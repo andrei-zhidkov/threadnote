@@ -118,6 +118,9 @@ Checked-in project skills live in `.cursor/skills/`. Use them for exact-HEAD glo
 focused testing, and dogfood closeout instead of re-deriving this file or `docs/releasing.md`. Product skills shipped to
 users stay in `config/agent-skills/`.
 
+Use `.cursor/skills/release-signoff/SKILL.md` for prerelease manual E2E signoff. It owns low-cost worker orchestration
+and reporting; `docs/prerelease-manual-e2e-dogfood-matrix.md` owns test scenarios and expected results.
+
 ## Never ignore dogfooding issues
 
 Any unexpected behavior encountered while using Threadnote itself is product evidence, not disposable tooling noise.

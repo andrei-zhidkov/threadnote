@@ -1568,6 +1568,7 @@
         "docs/operations/telemetry-production.md",
         "docs/org-operations.md",
         "docs/org-pilot-provisioning.md",
+        "docs/prerelease-manual-e2e-dogfood-matrix.md",
         "docs/release-readiness.md",
         "docs/releasing.md",
         "docs/rollout.md",
