@@ -14,7 +14,7 @@ import {planContextHealthCitationBatch} from '@threadnote/context/citation_valid
 import {
   CONTEXT_BRIEF_CITATION_VALIDATOR_VERSION,
   type ContextBriefCitationValidationReceiptV2,
-  type ContextBriefMemoryCandidateV1,
+  type ContextHealthCitationSubjectV1,
   type ContextBriefMemoryCitationValidationV2,
 } from '@threadnote/context/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -58,6 +58,19 @@ export interface ContextMaintenanceWorkerObservation {
   readonly association: Effect.Success<ReturnType<typeof readContextMaintenanceCitationAssociation>>;
   readonly memoryGeneration?: string;
 }
+
+type CitationEvidenceOptions<R> = {
+  readonly mode?: 'foreground' | 'worker' | 'diagnostic';
+  readonly validate: (
+    selected: readonly ContextHealthCitationSubjectV1[],
+  ) => Effect.Effect<readonly ContextBriefMemoryCitationValidationV2[], unknown, R>;
+  readonly observeWorker?: (observation: ContextMaintenanceWorkerObservation) => Effect.Effect<void, never, R>;
+  readonly workerSubjectFence?: () => Effect.Effect<string | undefined, unknown, R>;
+  readonly skipWorkerValidation?: (
+    record: MemoryRecord,
+    observation: ContextMaintenanceWorkerObservation,
+  ) => Effect.Effect<boolean, unknown, R>;
+};
 
 /** Published identities and real source observations, never SQLite/WAL or lease/cache writes. */
 export const readContextMaintenanceSourceEpoch = Effect.fn('contextMaintenance.sourceEpoch')(function* (
@@ -195,6 +208,13 @@ export function projectMaintenanceCitationReceipts(input: {
   readonly now: number;
   readonly associations?: Readonly<Record<string, string>>;
 }): readonly ContextBriefMemoryCitationValidationV2[] {
+  return projectCitationReceipts(input, false);
+}
+
+function projectCitationReceipts(
+  input: Parameters<typeof projectMaintenanceCitationReceipts>[0],
+  includeExpiredUnknown: boolean,
+): readonly ContextBriefMemoryCitationValidationV2[] {
   const entries = new Map(input.entries.map(entry => [entry.uri, entry]));
   return input.records.flatMap(record => {
     const entry = entries.get(record.uri);
@@ -228,7 +248,8 @@ export function projectMaintenanceCitationReceipts(input: {
               receipt.snapshotId === source.snapshotId
             );
           })) &&
-        receiptWithinRetryWindow(receipt, input.now),
+        (receiptWithinRetryWindow(receipt, input.now) ||
+          (includeExpiredUnknown && expiredUnknownAttempt(receipt, input.now))),
     );
     return receipts.length === 0 ? [] : [{uri: record.uri, receipts, cacheHits: receipts.length}];
   });
@@ -244,28 +265,34 @@ function receiptWithinRetryWindow(receipt: ContextBriefCitationValidationReceipt
   );
 }
 
+function expiredUnknownAttempt(receipt: ContextBriefCitationValidationReceiptV2, now: number): boolean {
+  const observed = Date.parse(receipt.observedAt);
+  return (
+    receipt.status === 'unknown' &&
+    receipt.provenance !== 'historical-verified' &&
+    Number.isFinite(observed) &&
+    now - observed >= UNKNOWN_RETRY_MILLISECONDS
+  );
+}
+
 /** A receipt must have a live subject and its own published association before foreground route probing. */
 export function foregroundReceiptCandidates(
   entries: readonly Entry[],
   records: readonly MemoryRecord[],
-  candidates: readonly ContextBriefMemoryCandidateV1[],
-  now: number,
+  candidates: readonly ContextHealthCitationSubjectV1[],
+  _now: number,
 ) {
   const byEntry = new Map(entries.map(entry => [entry.uri, entry]));
   const byRecord = new Map(records.map(record => [record.uri, record]));
   const selectedEntries: Entry[] = [];
-  const selectedCandidates: ContextBriefMemoryCandidateV1[] = [];
+  const selectedCandidates: ContextHealthCitationSubjectV1[] = [];
   for (const candidate of candidates) {
     const entry = byEntry.get(candidate.uri);
     const record = byRecord.get(candidate.uri);
     if (entry === undefined || record === undefined || entry.contentHash !== memoryHash(record)) continue;
     const canonicalCitations = new Map((record.metadata.codeCitations ?? []).map(citation => [citation.id, citation]));
     const eligibleIds = new Set(
-      entry.receipts.flatMap(receipt =>
-        canonicalCitations.has(receipt.citationId) && receiptWithinRetryWindow(receipt, now)
-          ? [receipt.citationId]
-          : [],
-      ),
+      entry.receipts.flatMap(receipt => (canonicalCitations.has(receipt.citationId) ? [receipt.citationId] : [])),
     );
     const codeCitations = candidate.codeCitations.flatMap(citation => {
       const canonical = canonicalCitations.get(citation.id);
@@ -285,25 +312,14 @@ export function foregroundReceiptCandidates(
  * Explicit diagnostics admit one 96-citation batch. The worker supplies bounded record chunks;
  * its validated receipts accumulate independently of report pagination.
  */
-export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaintenance.collectCitationEvidence')(
+const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMaintenance.collectCitationEvidenceInner')(
   function* <R>(
     config: RuntimeConfig,
     project: string,
     records: readonly MemoryRecord[],
-    candidates: readonly ContextBriefMemoryCandidateV1[],
+    candidates: readonly ContextHealthCitationSubjectV1[],
     cwd: string,
-    options: {
-      readonly mode?: 'foreground' | 'worker' | 'diagnostic';
-      readonly validate: (
-        selected: readonly ContextBriefMemoryCandidateV1[],
-      ) => Effect.Effect<readonly ContextBriefMemoryCitationValidationV2[], unknown, R>;
-      readonly observeWorker?: (observation: ContextMaintenanceWorkerObservation) => Effect.Effect<void, never, R>;
-      readonly workerSubjectFence?: () => Effect.Effect<string | undefined, unknown, R>;
-      readonly skipWorkerValidation?: (
-        record: MemoryRecord,
-        observation: ContextMaintenanceWorkerObservation,
-      ) => Effect.Effect<boolean, unknown, R>;
-    },
+    options: CitationEvidenceOptions<R>,
   ) {
     if (!candidates.some(candidate => candidate.codeCitations.length > 0)) return [];
     const fs = yield* FileSystem.FileSystem;
@@ -377,15 +393,18 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
             );
             return receipts.length === 0 ? [] : [{...validation, receipts, cacheHits: receipts.length}];
           });
-    if (foreground && cached.length === 0) {
-      yield* enqueueEvidenceRequest(
-        file,
-        project,
-        cwd,
-        candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri),
-      );
-      return [];
-    }
+    const lastAttempts = foreground
+      ? projectCitationReceipts(
+          {entries: eligible?.entries ?? entries, records, sources, now, associations: association.bySelector},
+          true,
+        ).flatMap(validation => {
+          const receipts = validation.receipts.filter(
+            receipt =>
+              expiredUnknownAttempt(receipt, now) && candidateIds?.get(validation.uri)?.has(receipt.citationId),
+          );
+          return receipts.length === 0 ? [] : [{...validation, receipts, cacheHits: 0}];
+        })
+      : [];
     const receiptIds = new Map(
       cached.map(validation => [validation.uri, new Set(validation.receipts.map(receipt => receipt.citationId))]),
     );
@@ -439,7 +458,7 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
     for (const [root] of sources) closing.set(root, yield* closingSource(root));
     const canonicalByUri = new Map(records.map(record => [record.uri, record]));
     const returnedCitations = foreground
-      ? [...cached, ...computed].flatMap(validation =>
+      ? [...cached, ...lastAttempts, ...computed].flatMap(validation =>
           validation.receipts.map(receipt =>
             canonicalByUri
               .get(validation.uri)
@@ -473,7 +492,16 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         : association.epoch === closingAssociation.epoch) &&
       proofGeneration !== undefined &&
       [...sources].every(([root, observation]) => observation.epoch === closing.get(root)?.epoch);
-    if (!unchanged) return [];
+    if (!unchanged) {
+      if (foreground)
+        yield* enqueueEvidenceRequest(
+          file,
+          project,
+          cwd,
+          candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri),
+        );
+      return [];
+    }
     if (options.mode === 'worker' && options.observeWorker !== undefined)
       yield* options.observeWorker({
         sourceEpoch: closingAssociation.sourceEpochs[cwd] ?? (yield* readContextMaintenanceSourceEpoch(config, cwd)),
@@ -486,6 +514,15 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
       byUri.set(validation.uri, {...validation, receipts: [...(previous?.receipts ?? []), ...validation.receipts]});
     }
     const validations = [...byUri.values()];
+    const returnedByUri = new Map(byUri);
+    for (const attempt of lastAttempts) {
+      const previous = returnedByUri.get(attempt.uri);
+      returnedByUri.set(
+        attempt.uri,
+        previous === undefined ? attempt : {...previous, receipts: [...previous.receipts, ...attempt.receipts]},
+      );
+    }
+    const returnedValidations = [...returnedByUri.values()];
     const recordsByUri = new Map(records.map(record => [record.uri, record]));
     const additions: Entry[] = computed.flatMap(validation => {
       const record = recordsByUri.get(validation.uri);
@@ -575,7 +612,35 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         cwd,
         candidates.map(candidate => candidate.uri),
       );
-    return validations;
+    return returnedValidations;
+  },
+);
+
+export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaintenance.collectCitationEvidence')(
+  function* <R>(
+    config: RuntimeConfig,
+    project: string,
+    records: readonly MemoryRecord[],
+    candidates: readonly ContextHealthCitationSubjectV1[],
+    cwd: string,
+    options: CitationEvidenceOptions<R>,
+  ) {
+    const collect = collectContextMaintenanceCitationEvidenceInner(config, project, records, candidates, cwd, options);
+    if (options.mode === 'worker' || options.mode === 'diagnostic') return yield* collect;
+    const result = yield* collect.pipe(Effect.timeoutOption(3_000));
+    if (Option.isSome(result)) return result.value;
+    const uris = candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri);
+    if (uris.length > 0) {
+      const path = yield* Path.Path;
+      const file = path.join(
+        config.agentContextHome,
+        'context-maintenance',
+        'evidence',
+        `${sha256HexSync(`${project}\0${cwd}`)}.json`,
+      );
+      yield* enqueueEvidenceRequest(file, project, cwd, uris);
+    }
+    return [];
   },
 );
 
