@@ -9,11 +9,12 @@ import {
 } from '../agent_integration/index.js';
 import {
   configuredTeamChecks,
+  credentialFreeGitRemote,
   cursorCloudMemoryRoot,
   planCursorCloudBootstrap,
   type CursorCloudMemoryScope,
 } from '../cursor/cloud.js';
-import {readTeamsFile, runShareInit, runShareSync, shareTeamAccess} from '../share/index.js';
+import {listShareConflicts, readTeamsFile, runShareInit, runShareSync, shareTeamAccess} from '../share/index.js';
 import {withSharedRepositoryLock} from '../effect/share/lock.js';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {uriSegment} from '../mcp/server/common.js';
@@ -73,6 +74,14 @@ export const codexCloudMemoryScope = Effect.fn('codexCloud.memoryScope')(functio
       return yield* CodexCloudError.make({
         message: `Codex Cloud share "${name}" is missing or not writable. Rerun bootstrap with its existing remote or review threadnote share set-access.`,
       });
+    yield* Effect.try({
+      try: () => credentialFreeGitRemote(teamsFile.teams[name].remote, 'Codex Cloud'),
+      catch: cause =>
+        CodexCloudError.make({
+          cause,
+          message: `Codex Cloud share "${name}" has an invalid remote. Configure a credential-free URL with threadnote share set-url; supply authentication through the environment's Git credential provider.`,
+        }),
+    });
   }
   return {
     mode: 'shared-read-write',
@@ -80,6 +89,21 @@ export const codexCloudMemoryScope = Effect.fn('codexCloud.memoryScope')(functio
     shares: selected.map(team => ({root: cursorCloudMemoryRoot(config.user, team), team})),
     ...(localReads ? {localReadRoots: [`threadnote://user/${uriSegment(config.user)}/memories/handoffs`]} : {}),
   } satisfies CursorCloudMemoryScope;
+});
+
+const codexCloudShareIngestCheck = Effect.fn('codexCloud.shareIngestCheck')(function* (
+  config: RuntimeConfig,
+  team: string,
+) {
+  const conflicts = yield* listShareConflicts(config, {team});
+  return {
+    name: `share ingest ${team}`,
+    status: conflicts.length === 0 ? ('ok' as const) : ('fail' as const),
+    detail:
+      conflicts.length === 0
+        ? 'no pending memory conflicts'
+        : `${conflicts.length} pending memory conflict(s); inspect with threadnote share conflicts --team ${team}`,
+  };
 });
 
 export const runCodexCloudBootstrap = Effect.fn('codexCloud.bootstrap')(function* (
@@ -111,6 +135,8 @@ export const runCodexCloudBootstrap = Effect.fn('codexCloud.bootstrap')(function
         yield* Console.log(`Codex Cloud share "${team}" is already configured read-write; reusing it.`);
       }
       yield* runShareSync(config, {push: true, team});
+      const ingest = yield* codexCloudShareIngestCheck(config, team);
+      if (ingest.status === 'fail') return yield* CodexCloudError.make({message: ingest.detail});
       yield* installCodexCloudAgentIntegration(config, false);
       yield* persistCodexCloudProfile(config, teams);
     }),
@@ -144,7 +170,7 @@ export const runCodexCloudVerify = Effect.fn('codexCloud.verify')(function* (con
   for (const team of profile?.teams ?? []) {
     const configured = teamsFile.teams[team];
     if (!configured) checks.push({name: `share ${team}`, status: 'fail', detail: 'missing; rerun bootstrap'});
-    else
+    else {
       checks.push(
         ...(yield* configuredTeamChecks(fs, configured, team).pipe(
           Effect.map(values =>
@@ -152,6 +178,8 @@ export const runCodexCloudVerify = Effect.fn('codexCloud.verify')(function* (con
           ),
         )),
       );
+      checks.push(yield* codexCloudShareIngestCheck(config, team));
+    }
   }
   const receipt = {
     checks,

@@ -103,6 +103,16 @@ describe('Codex Cloud CLI integration', () => {
       await writeFile(join(f.home, 'share', 'teams.json'), JSON.stringify(accessConflict));
       await expect(f.bootstrap()).rejects.toMatchObject({stderr: expect.stringContaining('not read-write')});
       await writeFile(join(f.home, 'share', 'teams.json'), teams);
+      const invalidRemote = JSON.parse(teams);
+      invalidRemote.teams.personal.remote = 'https://example.invalid/memory.git?token=fixture-value';
+      await writeFile(join(f.home, 'share', 'teams.json'), JSON.stringify(invalidRemote));
+      await expect(f.run(['start', '--json'])).rejects.toMatchObject({
+        stderr: expect.stringContaining('credential-free URL'),
+      });
+      await expect(f.run(['recall', '--cwd', process.cwd(), '--query', 'fixture'])).rejects.toMatchObject({
+        stderr: expect.stringContaining('credential-free URL'),
+      });
+      await writeFile(join(f.home, 'share', 'teams.json'), teams);
       await mkdir(join(f.home, 'cursor-cloud'));
       await writeFile(
         join(f.home, 'cursor-cloud', 'profile.json'),
@@ -180,6 +190,26 @@ describe('Codex Cloud CLI integration', () => {
       const tree = await exec('git', ['--git-dir', f.remote, 'ls-tree', '-r', '--name-only', 'main']);
       expect(tree.stdout).toContain('contract.md');
       expect(tree.stdout).not.toContain('local-task');
+      const seed = `${f.remote}-seed`;
+      await exec('git', ['-C', seed, 'pull', '--rebase'], {env: {...process.env, ...gitIdentity}});
+      const inbound = join(seed, 'durable', 'projects', 'fixture');
+      await mkdir(inbound, {recursive: true});
+      await writeFile(
+        join(inbound, 'malformed.md'),
+        ['not a memory', '  code_citation: {not-json}', '', 'malformed fixture'].join('\r'),
+      );
+      await exec('git', ['-C', seed, 'add', '.']);
+      await exec('git', ['-C', seed, 'commit', '-m', 'Malformed inbound fixture'], {
+        env: {...process.env, ...gitIdentity},
+      });
+      await exec('git', ['-C', seed, 'push']);
+      await expect(f.run(['start', '--json'], second)).rejects.toMatchObject({
+        stdout: expect.stringContaining('pending memory conflict'),
+        stderr: expect.stringContaining('verification failed'),
+      });
+      await expect(f.bootstrap(second)).rejects.toMatchObject({
+        stderr: expect.stringContaining('share conflicts --team personal'),
+      });
     } finally {
       await rm(f.root, {recursive: true, force: true});
     }
@@ -231,6 +261,29 @@ describe('Codex Cloud CLI integration', () => {
         'Updated reviewed contract.',
       ]);
       expect((await f.run(['read', '--uri', uri])).stdout).toContain('Updated reviewed contract');
+      const selectedWorktree = JSON.parse(await readFile(join(f.home, 'share', 'teams.json'), 'utf8')).teams.personal
+        .worktree;
+      const selectedFile = join(selectedWorktree, 'durable', 'projects', 'fixture', 'contract.md');
+      const committedContent = await readFile(selectedFile, 'utf8');
+      await writeFile(selectedFile, `${committedContent}\nUncommitted local edit marker.\n`);
+      await expect(
+        f.run([
+          'remember',
+          '--replace-uri',
+          uri,
+          '--project',
+          'fixture',
+          '--topic',
+          'contract',
+          '--text',
+          'Conflicting replacement.',
+        ]),
+      ).rejects.toBeDefined();
+      expect(await readFile(selectedFile, 'utf8')).toContain('Uncommitted local edit marker');
+      expect(
+        (await exec('git', ['--git-dir', f.remote, 'show', 'main:durable/projects/fixture/contract.md'])).stdout,
+      ).toContain('Updated reviewed contract');
+      await writeFile(selectedFile, committedContent);
       await expect(
         f.run([
           'remember',
