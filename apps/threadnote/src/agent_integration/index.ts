@@ -97,6 +97,28 @@ export const installCursorCloudAgentIntegration = Effect.fn('agentIntegrations.i
   yield* dryRun ? install : withAgentIntegrationLock(config, install);
 });
 
+export const installCodexCloudAgentIntegration = Effect.fn('agentIntegrations.installCodexCloud')(function* (
+  config: RuntimeConfig,
+  dryRun: boolean,
+) {
+  const install = Effect.gen(function* () {
+    const existing = (yield* readAgentIntegrationRegistry(config))?.hosts.codex;
+    if (existing && existing.mcp.artifactProfile !== 'codex-cloud-personal') {
+      return yield* AgentIntegrationError.make({
+        message:
+          'This Threadnote home has a desktop Codex integration. Use a separate THREADNOTE_HOME for Codex Cloud.',
+      });
+    }
+    yield* installAgentIntegrationInTransaction(
+      config,
+      'codex',
+      {artifactProfile: 'codex-cloud-personal', name: 'threadnote', repair: false, transport: 'cli'},
+      dryRun,
+    );
+  });
+  yield* dryRun ? install : withAgentIntegrationLock(config, install);
+});
+
 export const migrateLegacyAgentIntegrations = Effect.fn('agentIntegrations.migrateLegacy')(function* (
   config: RuntimeConfig,
   inferredClients: readonly AgentClient[],
@@ -349,7 +371,14 @@ function agentArtifacts(agent: AgentClient, requestedProfile?: AgentArtifactProf
     const root = yield* toolRoot();
     const host = agent === 'omp' ? undefined : HOST_TARGETS[agent];
     const ompPaths = yield* resolveAgentHostPaths(agent, hostRoot);
-    const instructionPath = ompPaths?.instructionPath ?? (yield* expandPath(host!.instruction.path));
+    const system = yield* SystemInfo;
+    const codexRoot =
+      requestedProfile === 'codex-cloud-personal'
+        ? (hostRoot ?? (yield* expandPath(system.environment().CODEX_HOME ?? '~/.codex')))
+        : undefined;
+    const instructionPath = codexRoot
+      ? path.join(codexRoot, 'AGENTS.md')
+      : (ompPaths?.instructionPath ?? (yield* expandPath(host!.instruction.path)));
     const profile = requestedProfile ?? 'default';
     const profileRoot =
       profile === 'default' ? path.join(root, 'config') : path.join(root, 'config', 'agent-profiles', profile);
@@ -372,7 +401,7 @@ function agentArtifacts(agent: AgentClient, requestedProfile?: AgentArtifactProf
           },
         ];
     const skillRoot = ompPaths?.skillRoot ?? (yield* expandPath(host!.skillRoot));
-    const skills = profile === 'cursor-cloud-personal' ? CURSOR_CLOUD_PERSONAL_AGENT_SKILLS : AGENT_SKILLS;
+    const skills = profile === 'default' ? AGENT_SKILLS : CURSOR_CLOUD_PERSONAL_AGENT_SKILLS;
     for (const skill of skills) {
       const content = `${(yield* (yield* FileSystem.FileSystem).readFileString(
         path.join(profileRoot, 'agent-skills', skill, 'SKILL.md'),
@@ -385,7 +414,20 @@ function agentArtifacts(agent: AgentClient, requestedProfile?: AgentArtifactProf
         path: path.join(skillRoot, skill, 'SKILL.md'),
       });
     }
-    return {artifacts, ...(ompPaths === undefined ? {} : {hostRoot: ompPaths.agentRoot})} satisfies AgentArtifactPlan;
+    if (profile === 'codex-cloud-personal') {
+      const content = `${(yield* (yield* FileSystem.FileSystem).readFileString(path.join(profileRoot, 'start-skill.md'))).trim()}\n`;
+      artifacts.push({
+        content,
+        hash: yield* sha256Hex(content),
+        kind: 'file',
+        name: 'skill threadnote-start',
+        path: path.join(codexRoot!, 'threadnote-start-skill.md'),
+      });
+    }
+    return {
+      artifacts,
+      ...(codexRoot ? {hostRoot: codexRoot} : ompPaths === undefined ? {} : {hostRoot: ompPaths.agentRoot}),
+    } satisfies AgentArtifactPlan;
   });
 }
 

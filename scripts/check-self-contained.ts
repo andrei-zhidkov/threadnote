@@ -227,6 +227,12 @@ const checkSelfContained = Effect.gen(function* () {
         'threadnote-memory',
         'SKILL.md',
       ),
+      ...[
+        'agent-instructions.md',
+        'start-skill.md',
+        'agent-skills/threadnote-context/SKILL.md',
+        'agent-skills/threadnote-memory/SKILL.md',
+      ].map(file => path.join(root, 'dist', 'config', 'agent-profiles', 'codex-cloud-personal', file)),
       path.join(root, 'dist', 'cursor-plugin', '.cursor-plugin', 'plugin.json'),
       path.join(root, 'dist', 'cursor-plugin', 'assets', 'logo.svg'),
       path.join(root, 'dist', 'cursor-plugin', 'rules', 'threadnote.mdc'),
@@ -251,6 +257,20 @@ const checkSelfContained = Effect.gen(function* () {
         failures.push(`standalone build output is missing: ${normalizePath(path.relative(root, required))}`);
       }
     }
+    if (
+      yield* fs.exists(
+        path.join(
+          root,
+          'dist',
+          'config',
+          'agent-profiles',
+          'codex-cloud-personal',
+          'agent-skills',
+          'threadnote-code-graph',
+        ),
+      )
+    )
+      failures.push('Codex Cloud personal profile must remain memory-only');
     const personalCursorGraphSkill = path.join(
       root,
       'dist',

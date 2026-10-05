@@ -1,3 +1,4 @@
+import {makeCodexCloudCommand} from './codex_cloud_cli.js';
 import {makeContextRuntimeCommand} from './context_cli.js';
 import {makeCompactCommand, makeRecallFeedbackCommand, makeValueCommand} from './workflow_cli.js';
 import * as hooksCli from './hooks_cli.js';
@@ -1621,7 +1622,7 @@ const cursorCloud = Command.make('cursor').pipe(
 
 const cloud = Command.make('cloud').pipe(
   Command.withDescription('Cloud-agent integrations'),
-  Command.withSubcommands([cursorCloud]),
+  Command.withSubcommands([cursorCloud, makeCodexCloudCommand(withRuntimeEffect)]),
 );
 
 const shareInit = Command.make(

@@ -2612,6 +2612,41 @@ Measure the system before changing its implementation language.
     ).toBe('personal-cursor-cloud');
   });
 
+  it('documents published Codex Cloud CLI memory with explicit startup skill loading', () => {
+    const article = docsSections
+      .flatMap(section => section.articles)
+      .find(candidate => candidate.id === 'personal-codex-cloud');
+    const content = JSON.stringify(article);
+    expect(article?.title).toBe('Personal Codex Cloud setup');
+    for (const expected of [
+      'Install script',
+      'Start skill',
+      'cloud codex bootstrap',
+      'cloud codex start',
+      'cloud codex verify --json',
+      'cloud codex recall',
+      'cloud codex remember',
+      'threadnote-context/SKILL.md',
+      'threadnote-memory/SKILL.md',
+      'profile.json',
+      'republish',
+      'second fresh task',
+      'credential provider',
+      'never embed tokens',
+    ])
+      expect(content).toContain(expected);
+    expect(content).not.toContain('threadnote-code-graph/SKILL.md');
+    expect(
+      searchDocs(createDocsSearchIndex(docsSections), 'personal Codex Cloud published environment')[0]?.article.id,
+    ).toBe('personal-codex-cloud');
+    const cursor = JSON.stringify(
+      docsSections.flatMap(section => section.articles).find(candidate => candidate.id === 'personal-cursor-cloud'),
+    );
+    expect(cursor).toContain('two Agent Skills');
+    expect(cursor).toContain('Graph tools are unavailable');
+    expect(cursor).not.toContain('three Agent Skills');
+  });
+
   it('uses the real Manager labels and share status fields in the mock data', () => {
     expect(managerDemoTabs.map(tab => tab.label)).toEqual(['Graph', 'Library', 'Sharing', 'Health', 'Tools']);
     for (const share of managerDemoShares) {

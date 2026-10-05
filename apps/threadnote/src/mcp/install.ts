@@ -316,6 +316,14 @@ export const mcpConfigurationChecks = Effect.fn('mcp.configurationChecks')(funct
     const receipt = registry?.hosts[agent];
     const name = receipt?.mcp.name ?? THREADNOTE_MCP_NAME;
     const repair = receipt?.mcp.repair ?? true;
+    if (receipt?.mcp.transport === 'cli') {
+      checks.push({
+        detail: 'Codex Cloud uses scoped CLI commands and managed skills',
+        name: `${agent} CLI integration`,
+        status: 'ok',
+      });
+      continue;
+    }
     if (receipt?.mcp.external === true) {
       checks.push({
         detail: `${name} is registered in the Cursor Cloud Dashboard; verify its status from an active Cloud Agent`,
@@ -843,6 +851,11 @@ export const removeMcpConfigs = Effect.fn('mcp.removeConfigs')(function* (
   const removed: AgentClient[] = [];
   for (const client of clients) {
     const receipt = receipts[client];
+    if (receipt?.transport === 'cli') {
+      yield* Console.log(`Released ${client} CLI integration.`);
+      removed.push(client);
+      continue;
+    }
     if (receipt?.external === true) {
       yield* Console.log(`Released external ${client} MCP registration without modifying local host configuration.`);
       removed.push(client);

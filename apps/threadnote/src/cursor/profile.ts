@@ -52,6 +52,13 @@ export const readCursorCloudIdentityProfile = Effect.fn('cursorCloud.readIdentit
 export const persistCursorCloudIdentityProfile = Effect.fn('cursorCloud.persistIdentityProfile')(function* (
   config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'agentId' | 'user'>,
 ) {
+  const {readCodexCloudProfile, sameCloudIdentity} = yield* Effect.promise(() => import('../codex/profile.js'));
+  const codexProfile = yield* readCodexCloudProfile(config.agentContextHome);
+  if (codexProfile && !sameCloudIdentity(codexProfile, config)) {
+    return yield* CursorCloudIdentityProfileError.make({
+      message: 'This Threadnote home has a conflicting Codex Cloud identity. Use a separate THREADNOTE_HOME.',
+    });
+  }
   const existing = yield* readCursorCloudIdentityProfile(config.agentContextHome);
   const profile = cursorCloudIdentityProfile(config);
   if (existing) {
