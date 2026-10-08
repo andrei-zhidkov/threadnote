@@ -1,4 +1,7 @@
 import {publicStatus} from './maintenance_projection.js';
+import {reviewedSemanticMaintenanceCases, saveReviewedSemanticMaintenanceCases} from './semantic_review_state.js';
+import type {ContextMaintenanceReceiptV2, ContextMaintenanceReadOptions} from './maintenance_contracts.js';
+export type {ContextMaintenanceReceiptV2, ContextMaintenanceReadOptions} from './maintenance_contracts.js';
 import {
   selectFairMaintenanceWork,
   selectMaintenanceCitationCaseTask,
@@ -162,16 +165,6 @@ export interface ContextMaintenanceCaseV2 {
   readonly events: readonly {readonly at: string; readonly reason: string}[];
 }
 
-export interface ContextMaintenanceReceiptV2 {
-  readonly receiptId: string;
-  readonly project: string;
-  readonly subjectUri: string;
-  readonly archivedUri?: string;
-  readonly postHash: string;
-  readonly timestamp: string;
-  readonly state: 'applying' | 'applied' | 'undone' | 'conflict';
-}
-
 interface UndoJournal extends ContextMaintenanceReceiptV2 {
   readonly before: string;
   readonly after: string;
@@ -264,25 +257,25 @@ export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly workSchedule?: MaintenanceWorkSchedule;
 }
 
-export interface ContextMaintenanceReadOptions {
-  readonly limit?: number;
-  readonly caseCursor?: string;
-  readonly receiptCursor?: string;
-  readonly caseId?: string;
-  readonly receiptId?: string;
-}
-
 export const readContextMaintenanceStatus = Effect.fn('contextMaintenance.status')(function* (
   config: RuntimeConfig,
   project?: string,
   options: ContextMaintenanceReadOptions = {},
 ) {
-  const yieldedState = yield* readState(config);
+  const rawState = yield* readState(config);
+  const yieldedState = {...rawState, cases: yield* reviewedSemanticMaintenanceCases(config, rawState.cases, project)};
   return yield* Effect.try({
     try: () => publicStatus(yieldedState, project, options),
     catch: error => fail(error instanceof Error ? error.message : 'Invalid maintenance selector.'),
   });
 });
+export const reconcileSemanticReviewMaintenanceCases = (config: RuntimeConfig) =>
+  withStateLock(
+    config,
+    readState(config).pipe(
+      Effect.flatMap(state => saveReviewedSemanticMaintenanceCases(config, state, next => writeState(config, next))),
+    ),
+  );
 
 export const setContextMaintenancePaused = Effect.fn('contextMaintenance.pause')(function* (
   config: RuntimeConfig,
