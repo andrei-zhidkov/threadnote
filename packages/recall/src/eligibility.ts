@@ -5,6 +5,7 @@ export type RecallAuthorityEligibility = 'any' | 'approved-authoritative';
 export type RecallProjectEligibility =
   | {readonly mode: 'unrestricted'}
   | {readonly mode: 'allow-projects-and-projectless'; readonly projects: readonly string[]}
+  | {readonly mode: 'projectless-only'}
   | {readonly mode: 'deny-all'};
 
 /**
@@ -25,8 +26,10 @@ export interface DeriveRecallEligibilityPolicyInput {
   readonly originalQuery: string;
   /** Whether a separate hard URI boundary governs this recall. */
   readonly pinnedHardUri?: boolean;
-  /** Caller-supplied project only; cwd-derived ranking context stays soft/global. */
+  /** Caller-supplied project. */
   readonly explicitProject?: string;
+  /** Project resolved from the caller workspace or manifest; unrelated projects stay ineligible. */
+  readonly workspaceProject?: string;
   /** Undefined means no workset; an explicitly empty resolved workset fails closed. */
   readonly worksetProjectNames?: readonly string[];
 }
@@ -119,13 +122,23 @@ export function deriveRecallEligibilityPolicy(input: DeriveRecallEligibilityPoli
   const authority = originalQueryRequestsApprovedGuidance(input.originalQuery) ? 'approved-authoritative' : 'any';
   const resolvedWorksetProjects =
     input.worksetProjectNames === undefined ? undefined : normalizeRecallProjectNames(input.worksetProjectNames);
-  const projects = normalizeRecallProjectNames([
-    ...(input.explicitProject === undefined ? [] : [input.explicitProject]),
-    ...(resolvedWorksetProjects ?? []),
-  ]);
+  const explicitProject = normalizeRecallProjectNames(
+    input.explicitProject === undefined ? [] : [input.explicitProject],
+  );
+  const workspaceProject = normalizeRecallProjectNames(
+    input.workspaceProject === undefined ? [] : [input.workspaceProject],
+  );
+  const projects =
+    resolvedWorksetProjects === undefined
+      ? explicitProject[0] === undefined
+        ? workspaceProject
+        : explicitProject
+      : explicitProject[0] === undefined
+        ? resolvedWorksetProjects
+        : resolvedWorksetProjects.filter(project => project === explicitProject[0]);
 
   const projectEligibility: RecallProjectEligibility =
-    resolvedWorksetProjects !== undefined && resolvedWorksetProjects.length === 0
+    resolvedWorksetProjects !== undefined && projects.length === 0
       ? {mode: 'deny-all'}
       : projects.length === 0
         ? {mode: 'unrestricted'}
@@ -138,6 +151,7 @@ export function recallProjectIsEligible(policy: RecallProjectEligibility, projec
   if (policy.mode === 'deny-all') return false;
   if (policy.mode === 'unrestricted') return true;
   const normalizedProject = normalizeRecallProject(project);
+  if (policy.mode === 'projectless-only') return normalizedProject === undefined;
   return normalizedProject === undefined || policy.projects.includes(normalizedProject);
 }
 

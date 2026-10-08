@@ -18,7 +18,11 @@ import {
 import * as Base64Url from 'effect/encoding/Base64Url';
 import * as HttpServer from 'effect/http/HttpServer';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
-import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
+import {
+  createManagerHttpServer,
+  MANAGER_STATIC_FILES as STATIC_FILES,
+  type ManagerHttpRequest,
+} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
 import {
   ensureEffectAiReady,
@@ -96,6 +100,8 @@ import {runSeed, runSeedSkills} from '../seeding.js';
 import {readManagerRuntimeState} from './state.js';
 import {handleManagerWorkflowRequest} from './workflow.js';
 import {handleManagerProcessRequest} from './processes.js';
+import {handleManagerSharingConflictRequest} from './sharing_conflicts.js';
+import {handleManagerIntegrationRequest} from './integrations.js';
 import {handleManagerWorkspaceRequest} from './value.js';
 import {emptyManagerTree, readManagerTreeRoot} from '@threadnote/manager/tree';
 import {
@@ -326,36 +332,6 @@ interface BulkItemResult {
   readonly error?: string;
 }
 
-const STATIC_FILES: Readonly<
-  Record<
-    string,
-    {
-      readonly contentType: string;
-      readonly directory?: 'assets/brand' | 'manager';
-      readonly path: string;
-      readonly sourceDirectory?: 'dist/manager' | 'packages/manager/static';
-    }
-  >
-> = {
-  '/': {contentType: 'text/html; charset=utf-8', path: 'index.html', sourceDirectory: 'packages/manager/static'},
-  '/index.html': {
-    contentType: 'text/html; charset=utf-8',
-    path: 'index.html',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/app.css': {
-    contentType: 'text/css; charset=utf-8',
-    path: 'app.css',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js', sourceDirectory: 'dist/manager'},
-  '/threadnote-logo.svg': {
-    contentType: 'image/svg+xml; charset=utf-8',
-    directory: 'assets/brand',
-    path: 'threadnote-logo.svg',
-  },
-};
-
 export function runManage(config: RuntimeConfig, options: ManageOptions) {
   return Effect.scoped(
     Layer.build(BunHttpServer.layer({hostname: '127.0.0.1', port: options.uiPort ?? 0})).pipe(
@@ -556,6 +532,10 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
   if (!isAuthorized(context, request)) {
     writeJson(response, 401, {error: 'Unauthorized'});
     return;
+  }
+  for (const handler of [handleManagerSharingConflictRequest, handleManagerIntegrationRequest]) {
+    const result = yield* handler({body: request.body, config: context.config, method: request.method, url});
+    if (result) return writeJson(response, result.status, result.body);
   }
   const workflowResponse = yield* handleManagerWorkflowRequest({
     body: request.body,
@@ -1338,6 +1318,11 @@ const runBulk = Effect.fn('manager.runBulk')(function* (
         } else if (action === 'publish') {
           output = (yield* runCaptured(
             () => runSharePublish(config, uri, {team: optionalString(body.team)}),
+            runEffect,
+          )).output;
+        } else if (action === 'unpublish') {
+          output = (yield* runCaptured(
+            () => runShareUnpublish(config, uri, {team: optionalString(body.team)}),
             runEffect,
           )).output;
         } else {
