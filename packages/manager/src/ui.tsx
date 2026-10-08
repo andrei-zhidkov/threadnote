@@ -1,3 +1,10 @@
+import {ConsolidationPanel} from './consolidation_review.js';
+import {
+  MAX_CONSOLIDATION_SOURCES,
+  type ConsolidationReview,
+  type ConsolidationSource,
+} from '@threadnote/memory/consolidation';
+import {MemorySelectionBar} from './memory_selection_bar.js';
 import {SharingPanel} from './sharing_view.js';
 import {IntegrationsPanel} from './integrations_view.js';
 import {RuntimeHealthPanel} from './runtime_health_view.js';
@@ -16,7 +23,6 @@ import {
   RefreshCw,
   Search,
   Settings2,
-  Download,
   Users,
 } from 'lucide-react';
 import {DetailModal} from './detail_modal.js';
@@ -46,7 +52,7 @@ import {
 import {LibraryExplorer} from './library_explorer.js';
 import {useLibraryNavigatorResize} from './library_layout.js';
 import {settleManagerRefreshTasks} from '@threadnote/manager/refresh';
-import {DropdownSelect, Metadata, TargetFields} from '@threadnote/manager/ui/controls';
+import {Metadata, TargetFields} from '@threadnote/manager/ui/controls';
 import {
   initialManagerAvailability,
   managerActionsAreAvailable,
@@ -119,8 +125,12 @@ export {
 } from '@threadnote/manager/ui/support';
 
 import type {
+  ConsolidationJobResponse as ConsolidationJob,
+  TreeResponse,
+  DoctorCheck,
+  MemoryResponse,
+  ReadResponse,
   BulkItemResult,
-  MemoryMetadata,
   PanelName,
   SelectId,
   ShareSummary,
@@ -138,30 +148,8 @@ export type {
 } from '@threadnote/manager/ui/contracts';
 
 type NavTreeTab = 'memories' | 'resources';
-type CheckStatus = 'fail' | 'ok' | 'warn';
-type AgentClient = 'claude' | 'codex' | 'copilot' | 'cursor' | 'effect-ai';
+type AgentClient = 'claude' | 'codex' | 'copilot' | 'cursor' | 'effect-ai' | 'local-ai';
 type MemoryViewMode = 'edit' | 'preview';
-
-interface MemoryResponse {
-  readonly content: string;
-  readonly node: TreeNode;
-  readonly record?: {
-    readonly body: string;
-    readonly content: string;
-    readonly metadata: MemoryMetadata;
-    readonly uri: string;
-  };
-}
-interface ReadResponse {
-  readonly content: string;
-  readonly localMemory?: MemoryResponse;
-  readonly output: string;
-}
-
-interface TreeResponse {
-  readonly resourcesTree: TreeNode;
-  readonly tree: TreeNode;
-}
 
 interface AgentOption {
   readonly available: boolean;
@@ -191,21 +179,6 @@ interface StateResponse {
   readonly latestVersion?: string;
   readonly updateAvailable: boolean;
   readonly version: string;
-}
-
-interface DoctorCheck {
-  readonly detail: string;
-  readonly name: string;
-  readonly status: CheckStatus;
-}
-
-interface ConsolidationJob {
-  readonly agent: AgentClient;
-  readonly draft?: string;
-  readonly error?: string;
-  readonly id: string;
-  readonly sourceUris: readonly string[];
-  readonly status: 'completed' | 'failed' | 'running';
 }
 
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
@@ -244,7 +217,7 @@ function App(): React.ReactElement {
   const [savingMemory, setSavingMemory] = useState(false);
   const [libraryActionBusy, setLibraryActionBusy] = useState(false);
   const [bulkCount, setBulkCount] = useState(0);
-  const [showLibraryDetails, setShowLibraryDetails] = useState(false);
+  const [libraryDialog, setLibraryDialog] = useState<'details' | 'consolidate'>();
   const [creatingMemory, setCreatingMemory] = useState(false);
   const [editorRevision, setEditorRevision] = useState(0);
   const scopedTree = useMemo(() => libraryScopeTree(tree, libraryScope), [tree, libraryScope]);
@@ -263,9 +236,14 @@ function App(): React.ReactElement {
   });
   const [agent, setAgent] = useState<AgentClient>('codex');
   const [draft, setDraft] = useState('');
+  const [draftError, setDraftError] = useState<string | undefined>();
+  const [consolidationTopic, setConsolidationTopic] = useState('');
+  const [consolidationProject, setConsolidationProject] = useState<string | undefined>();
   const [jobId, setJobId] = useState<string | undefined>();
   const [draftingConsolidation, setDraftingConsolidation] = useState(false);
   const [applyingConsolidation, setApplyingConsolidation] = useState(false);
+  const [consolidationSources, setConsolidationSources] = useState<readonly ConsolidationSource[]>([]);
+  const [consolidationReviews, setConsolidationReviews] = useState<readonly ConsolidationReview[]>([]);
   const [consolidationSourceUris, setConsolidationSourceUris] = useState<readonly string[]>([]);
   const [bulkAction, setBulkAction] = useState<'archive' | 'forget' | 'publish' | 'unpublish' | undefined>();
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
@@ -449,8 +427,8 @@ function App(): React.ReactElement {
 
   useEffect(() => {
     const firstAvailable =
-      state?.agents.find(item => item.available && (item.id === 'codex' || item.id === 'claude')) ??
-      state?.agents.find(item => item.available);
+      state?.agents.find(item => item.available && item.id === 'local-ai') ??
+      state?.agents.find(item => item.available && ['codex', 'claude', 'effect-ai'].includes(item.id));
     if (firstAvailable) {
       setAgent(firstAvailable.id);
     }
@@ -1067,7 +1045,29 @@ function App(): React.ReactElement {
     }
   }
 
-  async function draftConsolidation(): Promise<void> {
+  function clearConsolidationDraft(uris: readonly string[] = []): void {
+    setJobId(undefined);
+    setDraft('');
+    setDraftError(undefined);
+    setConsolidationSources([]);
+    setConsolidationReviews([]);
+    setConsolidationSourceUris(uris);
+  }
+
+  function openConsolidation(): void {
+    if (consolidationBusy) return;
+    if (
+      consolidationSourceUris.length !== selectedList.length ||
+      consolidationSourceUris.some(uri => !visibleSelectedUris.has(uri))
+    ) {
+      clearConsolidationDraft(selectedList);
+      setConsolidationTopic('');
+      setConsolidationProject(workspaceProject);
+    }
+    setLibraryDialog('consolidate');
+  }
+
+  async function draftConsolidation(model: string): Promise<void> {
     if (draftingConsolidation || applyingConsolidation) {
       return;
     }
@@ -1078,43 +1078,68 @@ function App(): React.ReactElement {
       return;
     }
     setDraftingConsolidation(true);
-    setJobId(undefined);
-    setDraft('');
-    setConsolidationSourceUris(uris);
+    clearConsolidationDraft(uris);
     try {
       const result = await api<{job: ConsolidationJob}>('/api/consolidations', {
         agent,
-        kind: target.kind,
-        project: target.project,
-        status: target.status,
-        topic: target.topic,
+        model,
+        kind: 'durable',
+        project: consolidationProject ?? target.project,
+        status: 'active',
+        topic: consolidationTopic,
         uris,
       });
       if (result.job.status === 'completed') {
         setJobId(result.job.id);
         setDraft(result.job.draft ?? '');
         setConsolidationSourceUris(result.job.sourceUris);
+        setConsolidationSources(result.job.sources ?? []);
         toastMessage('Draft ready');
       } else {
         setConsolidationSourceUris([]);
-        setDraft(result.job.error ?? 'Draft failed');
+        setDraftError(result.job.error ?? 'The agent did not produce a draft.');
         toastMessage('Draft failed');
       }
     } catch (err) {
       setConsolidationSourceUris([]);
-      setDraft(errorMessage(err));
+      setDraftError(errorMessage(err));
       toastMessage(errorMessage(err));
     } finally {
       setDraftingConsolidation(false);
     }
   }
 
+  async function resumeConsolidationCleanup(): Promise<void> {
+    const receipt = memory?.record?.metadata.consolidation;
+    if (!receipt || !memory?.record || applyingConsolidation) return;
+    const confirmed = await dialogs.confirm({
+      confirmLabel: 'Resume cleanup',
+      title: 'Resume saved source cleanup?',
+      message: `Verify the saved result and resume its approved ${receipt.cleanup} cleanup. Changed source revisions will be preserved.`,
+    });
+    if (!confirmed) return;
+    setApplyingConsolidation(true);
+    try {
+      const result = await api<{readonly output?: string}>(`/api/consolidations/${receipt.operationId}/apply`, {
+        confirm: true,
+        resultUri: memory.record.uri,
+      });
+      if (result.output) setOutput(result.output);
+      await refreshAll();
+      toastMessage('Saved consolidation cleanup verified');
+    } catch (err) {
+      toastMessage(errorMessage(err));
+    } finally {
+      setApplyingConsolidation(false);
+    }
+  }
+
   async function applyConsolidation(): Promise<void> {
     if (draftingConsolidation || applyingConsolidation || !jobId || !draft) return;
     const confirmed = await dialogs.confirm({
-      confirmLabel: 'Apply consolidation',
-      message: `Store the consolidated memory and archive ${consolidationSourceUris.length} personal source${consolidationSourceUris.length === 1 ? '' : 's'}.`,
-      title: 'Apply this consolidation?',
+      confirmLabel: 'Save and archive sources',
+      message: `Save the new memory and archive eligible personal sources from ${consolidationSourceUris.length} selected memories.`,
+      title: 'Save this consolidated memory?',
     });
     if (!confirmed) return;
     const sourceUris = consolidationSourceUris;
@@ -1125,17 +1150,16 @@ function App(): React.ReactElement {
         cleanup: 'archive',
         confirm: true,
         draft,
-        kind: target.kind,
-        project: target.project,
-        status: target.status,
-        topic: target.topic,
+        reviews: consolidationReviews,
+        kind: 'durable',
+        project: consolidationProject ?? target.project,
+        status: 'active',
+        topic: consolidationTopic,
       });
       if (result.output) {
         setOutput(result.output);
       }
-      setDraft('');
-      setJobId(undefined);
-      setConsolidationSourceUris([]);
+      clearConsolidationDraft();
       setSelectedUris(new Set());
       if (currentSelectedUri && sourceUris.includes(currentSelectedUri)) {
         setSelectedUri(undefined);
@@ -1146,7 +1170,7 @@ function App(): React.ReactElement {
         await reloadSelected(currentSelectedUri);
       }
       await refreshTreeOnly();
-      toastMessage('Applied consolidation');
+      toastMessage('Consolidated memory saved');
     } catch (err) {
       toastMessage(errorMessage(err));
     } finally {
@@ -1178,7 +1202,7 @@ function App(): React.ReactElement {
     if (uri !== selectedUri && !(await confirmDiscardDraft())) return;
     if (uri !== selectedUri) draftRef.current = undefined;
     setCreatingMemory(false);
-    setShowLibraryDetails(false);
+    setLibraryDialog(undefined);
     setSelectedUri(uri);
     setPanel('memory');
     setNavTreeTab(isResourceUri(uri) ? 'resources' : 'memories');
@@ -1190,7 +1214,7 @@ function App(): React.ReactElement {
     if (!(await confirmDiscardDraft())) return;
     draftRef.current = undefined;
     setPendingCanonical(undefined);
-    setShowLibraryDetails(false);
+    setLibraryDialog(undefined);
     setCreatingMemory(false);
     setSelectedUri(undefined);
     setContent('');
@@ -1294,7 +1318,7 @@ function App(): React.ReactElement {
   const markdownPreview = markdownBodyForPreview(content);
   const canMutate = Boolean(selectedUri && selectedIsReadable && !selectedIsDir && !selectedIsResource);
   const consolidationBusy = draftingConsolidation || applyingConsolidation;
-  const canDraftConsolidation = selectedList.length > 0 || !selectedIsResource;
+  const canDraftConsolidation = selectedList.length >= 2 && selectedList.length <= MAX_CONSOLIDATION_SOURCES;
   const doctorBusy = doctorAction !== undefined;
   const selectedHasPendingCanonical = pendingCanonical !== undefined && pendingCanonical.node.uri === selectedUri;
   const controlsBlocked =
@@ -1316,6 +1340,39 @@ function App(): React.ReactElement {
   const authoringMemory =
     creatingMemory ||
     (memoryViewMode === 'edit' && !!selectedUri && !selectedIsDir && !selectedIsResource && !selectedNode?.isSystem);
+  const libraryDialogTitle =
+    libraryDialog === 'consolidate' ? 'Consolidate memories' : selectedIsResource ? 'Source details' : 'Memory details';
+  const consolidationPanel = (standalone = false) => (
+    <ConsolidationPanel
+      standalone={standalone}
+      disabled={consolidationBusy || controlsBlocked}
+      busy={consolidationBusy}
+      canResume={!standalone && !!memory?.record?.metadata.consolidation}
+      error={standalone ? undefined : memory?.record?.metadata.consolidationError}
+      draftError={draftError}
+      topic={consolidationTopic}
+      project={consolidationProject ?? target.project}
+      onTopicChange={setConsolidationTopic}
+      onProjectChange={setConsolidationProject}
+      agents={state?.agents ?? []}
+      agent={agent}
+      onAgentChange={value => void (isAgentClient(value) && setAgent(value))}
+      openSelect={openSelect}
+      setOpenSelect={setOpenSelect}
+      canDraft={canDraftConsolidation}
+      drafting={draftingConsolidation}
+      applying={applyingConsolidation}
+      draft={draft}
+      sources={consolidationSources}
+      reviews={consolidationReviews}
+      onDraftChange={setDraft}
+      onReviewChange={setConsolidationReviews}
+      hasJob={!!jobId}
+      onDraft={model => void draftConsolidation(model)}
+      onApply={() => void applyConsolidation()}
+      onResume={() => void resumeConsolidationCleanup()}
+    />
+  );
   const libraryDetails = (
     <aside className="inspector">
       <h3>{selectedIsResource ? 'Source details' : memory ? 'Memory details' : 'Properties'}</h3>
@@ -1342,46 +1399,7 @@ function App(): React.ReactElement {
           <Metadata metadata={memory?.record?.metadata} node={memory?.node ?? selectedNode} />
         </>
       )}
-      {!selectedIsResource && !creatingMemory ? (
-        <details className="consolidation-details">
-          <summary>Consolidate memories</summary>
-          <div className="field-row select-row">
-            <DropdownSelect
-              id="agent"
-              label="Agent"
-              onChange={value => void (isAgentClient(value) && setAgent(value))}
-              openSelect={openSelect}
-              options={(state?.agents ?? []).map(item => ({
-                disabled: !item.available || (item.id !== 'codex' && item.id !== 'claude'),
-                label: `${item.label}${item.available ? '' : ' unavailable'}`,
-                value: item.id,
-              }))}
-              setOpenSelect={setOpenSelect}
-              value={agent}
-            />
-            <button
-              disabled={consolidationBusy || controlsBlocked || !canDraftConsolidation}
-              onClick={() => void draftConsolidation()}
-            >
-              {draftingConsolidation ? 'Drafting...' : 'Draft'}
-            </button>
-          </div>
-          <textarea
-            aria-busy={consolidationBusy}
-            placeholder={draftingConsolidation ? 'Generating draft...' : 'Draft preview'}
-            readOnly={consolidationBusy || controlsBlocked}
-            value={draft}
-            onChange={event => setDraft(event.target.value)}
-            spellCheck={false}
-          />
-          <button
-            disabled={consolidationBusy || controlsBlocked || !jobId || !draft}
-            onClick={() => void applyConsolidation()}
-          >
-            {applyingConsolidation ? 'Applying...' : 'Apply draft'}
-          </button>
-        </details>
-      ) : null}
+      {!selectedIsResource && !creatingMemory ? consolidationPanel() : null}
     </aside>
   );
 
@@ -1677,44 +1695,22 @@ function App(): React.ReactElement {
                         {
                           label: 'Consolidate memories…',
                           icon: <ListChecks />,
-                          disabled: navTreeTab !== 'memories',
-                          onSelect: () => setShowLibraryDetails(true),
+                          disabled: navTreeTab !== 'memories' || consolidationBusy || controlsBlocked,
+                          onSelect: openConsolidation,
                         },
                       ]}
                     />
                   </div>
-                  {selectedList.length > 0 ? (
-                    <div className="selection-bar" aria-live="polite">
-                      <span>
-                        <strong>{selectedList.length}</strong> memories selected · includes hidden descendants
-                      </span>
-                      {libraryScope !== 'local' ? (
-                        <button disabled={controlsBlocked} onClick={() => void bulk('unpublish')}>
-                          <Download />
-                          Unpublish…
-                        </button>
-                      ) : (
-                        <>
-                          <button disabled={controlsBlocked} onClick={() => void bulk('archive')}>
-                            Archive
-                          </button>
-                          <button disabled={controlsBlocked || !canBulkPublish} onClick={() => void bulk('publish')}>
-                            Publish…
-                          </button>
-                          <button
-                            className="danger"
-                            disabled={controlsBlocked || libraryScope !== 'local'}
-                            onClick={() => void bulk('forget')}
-                          >
-                            Forget…
-                          </button>
-                        </>
-                      )}
-                      <button disabled={controlsBlocked} onClick={() => setSelectedUris(new Set())}>
-                        Clear
-                      </button>
-                    </div>
-                  ) : null}
+                  <MemorySelectionBar
+                    count={selectedList.length}
+                    disabled={controlsBlocked || consolidationBusy}
+                    canConsolidate={canDraftConsolidation && navTreeTab === 'memories'}
+                    canPublish={canBulkPublish}
+                    scope={libraryScope}
+                    onConsolidate={openConsolidation}
+                    onBulkAction={action => void bulk(action)}
+                    onClear={() => setSelectedUris(new Set())}
+                  />
                 </>
               ) : (
                 <div className="library-editor-navigation">
@@ -1800,7 +1796,7 @@ function App(): React.ReactElement {
                             className="quiet-icon"
                             aria-label="Memory details"
                             disabled={!selectedIsReadable && !selectedIsDir}
-                            onClick={() => setShowLibraryDetails(true)}
+                            onClick={() => setLibraryDialog('details')}
                           >
                             <Info aria-hidden="true" />
                           </button>
@@ -1914,13 +1910,16 @@ function App(): React.ReactElement {
                   </section>
 
                   {creatingMemory ? libraryDetails : null}
-                  {showLibraryDetails ? (
-                    <DetailModal
-                      title={selectedIsResource ? 'Source details' : 'Memory details'}
-                      onClose={() => setShowLibraryDetails(false)}
-                    >
-                      {libraryDetails}
-                      <p className="uri-line">{selectedUri}</p>
+                  {libraryDialog ? (
+                    <DetailModal title={libraryDialogTitle} onClose={() => setLibraryDialog(undefined)}>
+                      {libraryDialog === 'consolidate' ? (
+                        consolidationPanel(true)
+                      ) : (
+                        <>
+                          {libraryDetails}
+                          <p className="uri-line">{selectedUri}</p>
+                        </>
+                      )}
                     </DetailModal>
                   ) : null}
                 </div>
