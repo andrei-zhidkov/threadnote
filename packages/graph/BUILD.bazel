@@ -1000,6 +1000,7 @@ bun_test(
         "//packages/manager:src/graph/reconciliation.tsx",
         "//packages/manager:src/graph/scene.tsx",
         "//packages/manager:src/graph/workspace.tsx",
+        "//packages/manager:src/relative_time.ts",
         "//packages/manager:src/workspace.tsx",
         "//packages/memory:package.json",
         "//packages/memory:src/candidate.ts",
