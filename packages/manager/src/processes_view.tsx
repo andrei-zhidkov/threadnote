@@ -1,51 +1,24 @@
 import {PageActions} from './workspace.js';
 import {Check, Circle, Cpu, GitBranch, Monitor, Plug, RefreshCw, ShieldCheck} from 'lucide-react';
 import {DetailModal} from './detail_modal.js';
-import React, {useEffect, useState} from 'react';
+import React, {useState} from 'react';
+import {useManagerProcesses} from './process/live.js';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
 import {
   orderManagerProcessesByAttention,
   managerProcessIsActive,
   type ManageableManagerProcess,
-  type ManagerProcessDiagnostics,
 } from '@threadnote/manager/process/contracts';
-
-const PROCESS_POLL_MILLISECONDS = 2_000;
 
 export function ProcessesPanel(): React.ReactElement {
   const dialogs = useManagerDialogs();
-  const [diagnostics, setDiagnostics] = useState<ManagerProcessDiagnostics>();
-  const [loadError, setLoadError] = useState('');
+  const {diagnostics, loadError, load} = useManagerProcesses();
   const [operationError, setOperationError] = useState('');
   const [inspected, setInspected] = useState<ManageableManagerProcess>();
   const [terminating, setTerminating] = useState<string>();
   const displayedProcesses =
     diagnostics === undefined ? undefined : orderManagerProcessesForPresentation(diagnostics.processes);
-
-  const load = async (signal?: AbortSignal): Promise<void> => {
-    try {
-      const next = await api<ManagerProcessDiagnostics>('/api/processes', undefined, {signal});
-      setDiagnostics(next);
-      setLoadError('');
-    } catch (cause) {
-      if (!signal?.aborted) setLoadError(errorMessage(cause));
-    }
-  };
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer: number | undefined;
-    const poll = async (): Promise<void> => {
-      await load(controller.signal);
-      if (!controller.signal.aborted) timer = window.setTimeout(() => void poll(), PROCESS_POLL_MILLISECONDS);
-    };
-    void poll();
-    return () => {
-      controller.abort();
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, []);
 
   const terminate = async (process: ManageableManagerProcess): Promise<void> => {
     if (!process.terminable || process.processRef === undefined) return;

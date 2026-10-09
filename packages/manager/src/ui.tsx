@@ -35,6 +35,8 @@ import {ContextPanel} from './context/view.js';
 import {ManagerDialogProvider, useManagerDialogs} from '@threadnote/manager/dialog';
 import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
+import {ManagerProcessesProvider} from './process/live.js';
+import {ManagerOperationsFooter} from './operations_footer.js';
 import {ManagerHomePanel} from './home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from './attention_view.js';
 import {ManagerNavigation, NavigationToggle, useNavigationCollapse} from './navigation.js';
@@ -1963,8 +1965,11 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
           ) : null}
         </div>
         <footer className="workspace-footer">
-          <span>Threadnote Manager · Local workspace</span>
-          <span>{state ? `v${state.version}` : 'Connecting…'}</span>
+          <ManagerOperationsFooter onOpen={() => setPanel('processes')} />
+          <div className="workspace-footer-meta">
+            <span>Threadnote Manager · Local workspace</span>
+            <span>{state ? `v${state.version}` : 'Connecting…'}</span>
+          </div>
         </footer>
       </main>
       {busyOverlayMessage ? (
@@ -1984,7 +1989,9 @@ export function mountManager({integrations}: {readonly integrations: readonly In
   }
   createRoot(root).render(
     <ManagerDialogProvider>
-      <App integrations={integrations} />
+      <ManagerProcessesProvider>
+        <App integrations={integrations} />
+      </ManagerProcessesProvider>
     </ManagerDialogProvider>,
   );
 }

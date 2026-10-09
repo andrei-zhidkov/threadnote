@@ -1,6 +1,6 @@
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import {graphAdministrationBusyLabel, mergeGraphCatalogStatus, type GraphCatalog} from '@threadnote/manager/graph';
 import {GraphAdministration, GraphReconciliationProgress} from '@threadnote/manager/graph/panels';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
@@ -17,6 +17,41 @@ const observed = {
 };
 
 describe('Manager reconciliation visibility', () => {
+  it('shows snapshot creation and later view updates as relative ages with exact timestamps', () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-09T12:00:00Z'));
+    const report = reportFixture();
+    const view = report.databases[0].views[0];
+    const timed = {
+      ...report,
+      databases: [
+        {
+          ...report.databases[0],
+          views: [
+            {
+              ...view,
+              activatedAt: '2026-10-09T11:59:30Z',
+              snapshot: {...view.snapshot, completedAt: '2026-10-08T12:00:00Z'},
+            },
+          ],
+        },
+      ],
+    };
+    try {
+      const markup = renderToStaticMarkup(
+        createElement(GraphAdministration, {
+          onAction: () => undefined,
+          onDiagnostics: () => undefined,
+          report: timed,
+        }),
+      );
+      expect(markup).toContain('Created 1 day ago');
+      expect(markup).toContain('Updated 30 sec ago');
+      expect(markup).toContain('dateTime="2026-10-08T12:00:00Z"');
+      expect(markup).toContain('Worktree view last updated: 2026-10-09T11:59:30Z');
+    } finally {
+      clock.mockRestore();
+    }
+  });
   it('keeps pending reconciliation separate from exclusive administration work', () => {
     const catalog = {...emptyCatalog(), lifecyclePending: true, reconciliation: observed};
     expect(graphAdministrationBusyLabel(undefined, catalog)).toBeUndefined();
