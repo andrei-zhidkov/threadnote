@@ -1,3 +1,4 @@
+import {SourceCoordinator} from '@threadnote/integration-core/source-coordinator';
 import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readSourceConfiguration} from './config.js';
@@ -7,39 +8,34 @@ import {
   runObsidianSourceRemove,
   runObsidianSourceStatus,
   runObsidianSourceSync,
-  syncObsidianSourcesBeforeRecall,
-} from './obsidian/source.js';
+} from '@threadnote/integration-obsidian/source';
 import {
   runSuperhumanSourceAdd,
   runSuperhumanSourceInventory,
   runSuperhumanSourceRemove,
   runSuperhumanSourceStatus,
   runSuperhumanSourceSync,
-  syncSuperhumanSourcesBeforeRecall,
-} from './superhuman/source.js';
+} from '@threadnote/integration-superhuman/source';
 import {
   runPocketSourceAdd,
   runPocketSourceInventory,
   runPocketSourceRemove,
   runPocketSourceStatus,
   runPocketSourceSync,
-  syncPocketSourcesBeforeRecall,
-} from './pocket/source.js';
+} from '@threadnote/integration-pocket/source';
 import {
   runGitHubSourceAdd,
   runGitHubSourceRemove,
   runGitHubSourceStatus,
   runGitHubSourceSync,
-  syncGitHubSourcesBeforeRecall,
-} from './github/source.js';
+} from '@threadnote/integration-github/source';
 
 import {
   runLinearSourceAdd,
   runLinearSourceRemove,
   runLinearSourceStatus,
   runLinearSourceSync,
-  syncLinearSourcesBeforeRecall,
-} from './linear/source.js';
+} from '@threadnote/integration-linear/source';
 
 export interface SourceAddOptions {
   readonly type: 'obsidian' | 'superhuman' | 'pocket' | 'linear' | 'github';
@@ -170,25 +166,11 @@ export const runSourceRemove = Effect.fn('source.remove')(function* (
 });
 
 export const syncSourcesBeforeRecall = Effect.fn('source.syncBeforeRecall')(function* (config: RuntimeConfig) {
-  const obsidian = yield* syncObsidianSourcesBeforeRecall(config);
-  const superhuman = yield* syncSuperhumanSourcesBeforeRecall(config);
-  const pocket = yield* syncPocketSourcesBeforeRecall(config);
-  const linear = yield* syncLinearSourcesBeforeRecall(config);
-  const github = yield* syncGitHubSourcesBeforeRecall(config);
-  return {
-    syncedSources: [
-      ...obsidian.syncedSources,
-      ...superhuman.syncedSources,
-      ...pocket.syncedSources,
-      ...linear.syncedSources,
-      ...github.syncedSources,
-    ],
-    warnings: [
-      ...obsidian.warnings,
-      ...superhuman.warnings,
-      ...pocket.warnings,
-      ...linear.warnings,
-      ...github.warnings,
-    ],
-  };
+  const coordinator = yield* SourceCoordinator;
+  return yield* coordinator.requestRefresh(config).pipe(
+    Effect.match({
+      onSuccess: () => ({syncedSources: [], warnings: []}),
+      onFailure: error => ({syncedSources: [], warnings: [error.message]}),
+    }),
+  );
 });

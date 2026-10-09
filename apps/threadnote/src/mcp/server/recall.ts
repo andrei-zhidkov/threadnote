@@ -96,7 +96,7 @@ import {
   RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS,
 } from '@threadnote/recall/mcp/response';
 import {mergeRecallOperationalWarnings} from '@threadnote/recall/warning';
-import {syncSourcesBeforeRecall} from '../../integrations/source.js';
+import {syncSourcesBeforeRecall} from '@threadnote/integration-core/source-sync';
 import {withProductionPhaseTiming} from '../../effect/production_log.js';
 import {withAnonymousTelemetryPhase} from '../../effect/telemetry.js';
 import type {ApplyMemoryCandidateInput} from '../../memory/candidate_apply_contract.js';
@@ -1005,7 +1005,7 @@ interface RecallToolParams {
 
 const RECALL_MCP_PROGRESS = {
   lexicalRanking: {message: 'Ranking recall candidates.', phase: 'recall.lexical-ranking'},
-  obsidianSync: {message: 'Refreshing configured sources.', phase: 'recall.obsidian-sync'},
+  obsidianSync: {message: 'Requesting source refresh.', phase: 'recall.obsidian-sync'},
   semanticRetrieval: {message: 'Searching memory indexes.', phase: 'recall.semantic-retrieval'},
   sharedSync: {message: 'Refreshing shared memories.', phase: 'recall.shared-sync'},
   workspaceContext: {message: 'Resolving recall scope.', phase: 'recall.workspace-context'},
