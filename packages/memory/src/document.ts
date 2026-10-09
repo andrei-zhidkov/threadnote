@@ -6,6 +6,10 @@ import {
 } from './consolidation.js';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {
+  serializeSourceEvidenceCitation,
+  type SourceEvidenceCitationV1,
+} from '@threadnote/store/source-evidence-citation';
+import {
   assertMemorySchemaWritable,
   formatMemoryCodeCitationLines,
   isMemoryCodeCitationSchemaVersion,
@@ -21,6 +25,75 @@ export type MemoryAuthority = 'agent_generated' | 'canonical_repo' | 'external' 
 export type MemoryTrust = 'approved' | 'inferred' | 'untrusted';
 
 export type MemoryVisibility = 'external' | 'personal' | 'shared';
+
+export interface MemoryObsidianEvidenceV1 {
+  readonly version: 1;
+  readonly sourceId: string;
+  readonly sourceInstanceId: string;
+  readonly vaultHash: string;
+  readonly accessHash: string;
+  readonly noteId: string;
+  readonly relativePath: string;
+  readonly revisionHash: string;
+  readonly sanitizerVersion: string;
+  readonly fragmentHash: string;
+  readonly fragmentStart: number;
+  readonly fragmentEnd: number;
+  readonly pinId: string;
+  readonly expiresAt: string;
+}
+
+const EVIDENCE_HEADER = 'obsidian_evidence';
+const SOURCE_EVIDENCE_HEADER = 'source_evidence';
+const MAX_MEMORY_OBSIDIAN_EVIDENCE_BYTES = 4096;
+const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const UUID_PATTERN = /^[a-f0-9-]{36}$/u;
+
+export function validMemoryObsidianEvidence(value: unknown): value is MemoryObsidianEvidenceV1 {
+  if (typeof value !== 'object' || value === null) return false;
+  const entry = value as Partial<MemoryObsidianEvidenceV1>;
+  return (
+    entry.version === 1 &&
+    typeof entry.sourceId === 'string' &&
+    /^[a-z0-9][a-z0-9._-]{0,127}$/u.test(entry.sourceId) &&
+    typeof entry.sourceInstanceId === 'string' &&
+    UUID_PATTERN.test(entry.sourceInstanceId) &&
+    typeof entry.vaultHash === 'string' &&
+    HASH_PATTERN.test(entry.vaultHash) &&
+    typeof entry.accessHash === 'string' &&
+    HASH_PATTERN.test(entry.accessHash) &&
+    typeof entry.noteId === 'string' &&
+    UUID_PATTERN.test(entry.noteId) &&
+    typeof entry.relativePath === 'string' &&
+    entry.relativePath.length > 0 &&
+    entry.relativePath.length <= 4096 &&
+    !entry.relativePath.startsWith('/') &&
+    !entry.relativePath.split('/').some(segment => !segment || segment === '.' || segment === '..') &&
+    typeof entry.revisionHash === 'string' &&
+    HASH_PATTERN.test(entry.revisionHash) &&
+    typeof entry.sanitizerVersion === 'string' &&
+    entry.sanitizerVersion === 'scrubber-redact-v1' &&
+    typeof entry.fragmentHash === 'string' &&
+    HASH_PATTERN.test(entry.fragmentHash) &&
+    Number.isSafeInteger(entry.fragmentStart) &&
+    entry.fragmentStart! >= 0 &&
+    Number.isSafeInteger(entry.fragmentEnd) &&
+    entry.fragmentEnd! > entry.fragmentStart! &&
+    typeof entry.pinId === 'string' &&
+    UUID_PATTERN.test(entry.pinId) &&
+    typeof entry.expiresAt === 'string' &&
+    Number.isFinite(Date.parse(entry.expiresAt))
+  );
+}
+
+function serializeMemoryObsidianEvidence(value: unknown): string {
+  if (!validMemoryObsidianEvidence(value)) throw new Error('Invalid Obsidian evidence citation metadata.');
+  const serialized = JSON.stringify(value);
+  if (new TextEncoder().encode(serialized).byteLength > MAX_MEMORY_OBSIDIAN_EVIDENCE_BYTES) {
+    throw new Error('Obsidian evidence citation metadata exceeds the 4096-byte limit.');
+  }
+  return serialized;
+}
 
 export const MEMORY_RELATION_TYPES = ['depends_on', 'evidence_for', 'references', 'related_to', 'supersedes'] as const;
 
@@ -46,6 +119,12 @@ export interface MemoryMetadata {
   readonly consolidationError?: string;
   readonly createdAt?: string;
   readonly evidence?: readonly string[];
+  /** Private, immutable imported-note evidence identity; historical text lives in a bounded pin. */
+  readonly obsidianEvidence?: MemoryObsidianEvidenceV1;
+  readonly obsidianEvidenceError?: boolean;
+  /** Private immutable external source evidence; supporting text lives in a bounded pin. */
+  readonly sourceEvidence?: SourceEvidenceCitationV1;
+  readonly sourceEvidenceError?: boolean;
   readonly kind: MemoryKind;
   readonly keywords?: readonly string[];
   readonly lastReviewed?: string;
@@ -122,6 +201,38 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
     memoryCodeCitationHeaderValues(lines),
     canonicalCodeCitationSchemaVersion(lines, schemaVersion),
   );
+  const evidenceLines = lines.filter(line => /^\s*obsidian_evidence\s*:/u.test(line));
+  const evidenceValue =
+    evidenceLines.length === 1 && evidenceLines[0]?.startsWith(`${EVIDENCE_HEADER}: `)
+      ? evidenceLines[0].slice(EVIDENCE_HEADER.length + 2)
+      : undefined;
+  let obsidianEvidence: MemoryObsidianEvidenceV1 | undefined;
+  if ((schemaVersion === 7 || schemaVersion === MEMORY_SCHEMA_VERSION) && evidenceValue) {
+    try {
+      const parsed: unknown = JSON.parse(evidenceValue);
+      if (serializeMemoryObsidianEvidence(parsed) === evidenceValue) {
+        obsidianEvidence = parsed as MemoryObsidianEvidenceV1;
+      }
+    } catch {
+      // Invalid citation metadata remains visible as an error and blocks rewrites/sharing.
+    }
+  }
+  const sourceEvidenceLines = lines.filter(line => /^\s*source_evidence\s*:/u.test(line));
+  const sourceEvidenceValue =
+    sourceEvidenceLines.length === 1 && sourceEvidenceLines[0]?.startsWith(`${SOURCE_EVIDENCE_HEADER}: `)
+      ? sourceEvidenceLines[0].slice(SOURCE_EVIDENCE_HEADER.length + 2)
+      : undefined;
+  let sourceEvidence: SourceEvidenceCitationV1 | undefined;
+  if (schemaVersion === MEMORY_SCHEMA_VERSION && sourceEvidenceValue) {
+    try {
+      const parsed: unknown = JSON.parse(sourceEvidenceValue);
+      if (serializeSourceEvidenceCitation(parsed as SourceEvidenceCitationV1) === sourceEvidenceValue) {
+        sourceEvidence = parsed as SourceEvidenceCitationV1;
+      }
+    } catch {
+      // Invalid evidence remains visible and blocks rewriting and sharing.
+    }
+  }
   const consolidationLines = lines.filter(line => /^\s*consolidation\s*:/u.test(line));
   const consolidationValues = memoryHeaderValues(lines, 'consolidation') ?? [];
   let consolidation: ConsolidationProvenance | undefined;
@@ -129,7 +240,7 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
   if (consolidationLines.length) {
     try {
       if (
-        schemaVersion !== 6 ||
+        (schemaVersion !== 6 && schemaVersion !== 7 && schemaVersion !== MEMORY_SCHEMA_VERSION) ||
         consolidationLines.length !== 1 ||
         !consolidationLines[0].startsWith('consolidation: ') ||
         consolidationValues.length !== 1 ||
@@ -170,6 +281,10 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       consolidationError,
       createdAt: memoryHeaderValueFromLines(lines, 'created_at'),
       evidence: canonicalResourceInputs(memoryHeaderValues(lines, 'evidence')),
+      obsidianEvidence,
+      obsidianEvidenceError: evidenceLines.length > 0 ? obsidianEvidence === undefined : undefined,
+      sourceEvidence,
+      sourceEvidenceError: sourceEvidenceLines.length > 0 ? sourceEvidence === undefined : undefined,
       kind,
       keywords: memoryHeaderValues(lines, 'keywords'),
       lastReviewed: memoryHeaderValueFromLines(lines, 'last_reviewed'),
@@ -206,7 +321,12 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
   assertMemorySchemaWritable(metadata.schemaVersion);
   if (metadata.consolidationError) throw new Error(metadata.consolidationError);
   if (metadata.consolidation) {
-    if (metadata.schemaVersion !== 6) throw new Error('Consolidation provenance requires memory schema version 6.');
+    if (
+      metadata.schemaVersion !== 6 &&
+      metadata.schemaVersion !== 7 &&
+      metadata.schemaVersion !== MEMORY_SCHEMA_VERSION
+    )
+      throw new Error('Consolidation provenance requires memory schema version 6, 7, or 8.');
     const reviewed = validateConsolidationProvenance(
       metadata.consolidation,
       body.trim(),
@@ -220,6 +340,21 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
   }
   if (metadata.citationErrors && metadata.citationErrors.length > 0) {
     throw new Error('Cannot format memory metadata with unresolved code-citation errors.');
+  }
+  if (
+    metadata.obsidianEvidenceError ||
+    (metadata.obsidianEvidence && !validMemoryObsidianEvidence(metadata.obsidianEvidence))
+  ) {
+    throw new Error('Invalid Obsidian evidence citation metadata.');
+  }
+  if (metadata.obsidianEvidence && metadata.schemaVersion !== 7 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION) {
+    throw new Error('Obsidian evidence requires memory schema version 7 or 8.');
+  }
+  if (metadata.sourceEvidenceError) throw new Error('Invalid source evidence citation metadata.');
+  if (metadata.sourceEvidence) {
+    if (metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
+      throw new Error(`Source evidence requires memory schema version ${MEMORY_SCHEMA_VERSION}.`);
+    serializeSourceEvidenceCitation(metadata.sourceEvidence);
   }
   if (
     metadata.codeCitations &&
@@ -254,6 +389,12 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     memoryHeaderLine('source_session_id', metadata.sourceSessionId),
     memoryHeaderLine('source_commit', metadata.sourceCommit),
     ...codeCitationLines,
+    metadata.obsidianEvidence
+      ? `${EVIDENCE_HEADER}: ${serializeMemoryObsidianEvidence(metadata.obsidianEvidence)}`
+      : undefined,
+    metadata.sourceEvidence
+      ? `${SOURCE_EVIDENCE_HEADER}: ${serializeSourceEvidenceCitation(metadata.sourceEvidence)}`
+      : undefined,
     metadata.consolidation ? memoryHeaderLine('consolidation', JSON.stringify(metadata.consolidation)) : undefined,
     memoryHeaderLine('candidate_id', metadata.candidateId),
     memoryHeaderLine('source_hash', metadata.sourceHash),
@@ -371,8 +512,14 @@ export function assertMemoryDocumentSchemaWritable(content: string): void {
     if (!record?.metadata.consolidation || record.metadata.consolidationError)
       throw new Error(record?.metadata.consolidationError ?? 'Malformed consolidation provenance.');
   }
+  const hasObsidianEvidence = header.split('\n').some(line => /^\s*obsidian_evidence\s*:/u.test(line));
+  const hasSourceEvidence = header.split('\n').some(line => /^\s*source_evidence\s*:/u.test(line));
   const schemaLines = header.split('\n').filter(line => /^\s*schema_version\s*:/u.test(line));
-  if (schemaLines.length === 0) return;
+  if (schemaLines.length === 0) {
+    if (hasObsidianEvidence) throw new Error('Malformed Obsidian evidence citation metadata.');
+    if (hasSourceEvidence) throw new Error('Malformed source evidence citation metadata.');
+    return;
+  }
   if (schemaLines.length !== 1) {
     throw new Error('Memory schema_version header must appear exactly once before rewriting.');
   }
@@ -385,6 +532,18 @@ export function assertMemoryDocumentSchemaWritable(content: string): void {
   assertMemorySchemaWritable(schemaVersion);
   if (line !== `schema_version: ${schemaVersion}`) {
     throw new Error('Memory schema_version header must be a canonical positive safe integer before rewriting.');
+  }
+  if (hasObsidianEvidence) {
+    const record = parseMemoryDocument('threadnote://memory/evidence-check', content);
+    if (!record?.metadata.obsidianEvidence || record.metadata.obsidianEvidenceError) {
+      throw new Error('Malformed Obsidian evidence citation metadata.');
+    }
+  }
+  if (hasSourceEvidence) {
+    const record = parseMemoryDocument('threadnote://memory/evidence-check', content);
+    if (!record?.metadata.sourceEvidence || record.metadata.sourceEvidenceError) {
+      throw new Error('Malformed source evidence citation metadata.');
+    }
   }
 }
 
@@ -475,7 +634,7 @@ export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
   const parseable = normalizeMemoryDocumentLineEndings(memory);
   const header = parseable.slice(0, Math.max(0, parseable.indexOf('\n\n')) || parseable.length);
   const lines = header.split('\n');
-  const parsedRecord = lines.some(line => /^\s*consolidation\s*:/u.test(line))
+  const parsedRecord = lines.some(line => /^\s*(?:consolidation|obsidian_evidence|source_evidence)\s*:/u.test(line))
     ? parseMemoryDocument('threadnote://memory/inferred', memory)
     : undefined;
   const firstLine = lines[0]?.trim();
@@ -494,6 +653,10 @@ export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
     consolidationError: parsedRecord?.metadata.consolidationError,
     createdAt: memoryHeaderValueFromLines(lines, 'created_at'),
     evidence: canonicalResourceInputs(memoryHeaderValues(lines, 'evidence')),
+    obsidianEvidence: parsedRecord?.metadata.obsidianEvidence,
+    obsidianEvidenceError: parsedRecord?.metadata.obsidianEvidenceError,
+    sourceEvidence: parsedRecord?.metadata.sourceEvidence,
+    sourceEvidenceError: parsedRecord?.metadata.sourceEvidenceError,
     kind:
       parseMemoryKind(memoryHeaderValueFromLines(lines, 'kind')) ?? (firstLine === 'HANDOFF' ? 'handoff' : undefined),
     keywords: memoryHeaderValues(lines, 'keywords'),
