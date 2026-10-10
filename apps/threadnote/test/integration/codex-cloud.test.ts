@@ -30,8 +30,8 @@ async function fixture() {
   const userHome = join(root, 'user-home');
   await mkdir(userHome);
   const home = join(root, 'home');
-  const run = (args: readonly string[], targetHome = home) =>
-    exec(process.execPath, ['apps/threadnote/src/standalone.ts', 'cloud', 'codex', ...args, '--home', targetHome], {
+  const cli = (args: readonly string[], targetHome = home) =>
+    exec(process.execPath, ['apps/threadnote/src/standalone.ts', ...args, '--home', targetHome], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -45,9 +45,10 @@ async function fixture() {
       },
       maxBuffer: 2 * 1024 * 1024,
     });
+  const run = (args: readonly string[], targetHome = home) => cli(['cloud', 'codex', ...args], targetHome);
   const bootstrap = (targetHome = home, team = 'personal', url = remote) =>
     run(['bootstrap', '--remote', url, '--team', team], targetHome);
-  return {root, home, userHome, remote, otherRemote, run, bootstrap};
+  return {root, home, userHome, remote, otherRemote, run, bootstrap, cli};
 }
 
 function parsed(stdout: string) {
@@ -57,30 +58,192 @@ function parsed(stdout: string) {
     status?: string;
     shares?: string[];
     identity?: {user: string; agentId: string};
+    graph?: {freshness: string; snapshot?: {id: string; commit: string}};
   };
 }
 
 describe('Codex Cloud CLI integration', () => {
-  it('rejects unowned artifacts before previewing or creating a Git share', async () => {
-    const f = await fixture();
-    try {
-      const skill = join(f.userHome, '.agents', 'skills', 'threadnote-context', 'SKILL.md');
-      await mkdir(join(f.userHome, '.agents', 'skills', 'threadnote-context'), {recursive: true});
-      await writeFile(skill, 'Unrelated user skill.\n');
-      for (const options of [['--dry-run'], []]) {
-        await expect(
-          f.run(['bootstrap', '--remote', f.remote, '--team', 'personal', ...options]),
-        ).rejects.toMatchObject({
-          stderr: expect.stringContaining('not managed by Threadnote'),
-        });
-        await expect(readFile(join(f.home, 'share', 'teams.json'))).rejects.toMatchObject({code: 'ENOENT'});
-        await expect(readFile(join(f.home, 'codex-cloud', 'profile.json'))).rejects.toMatchObject({code: 'ENOENT'});
-        expect(await readFile(skill, 'utf8')).toBe('Unrelated user skill.\n');
+  it.each(['threadnote-context', 'threadnote-code-graph'])(
+    'rejects an unowned %s skill before previewing or creating a Git share',
+    async skillName => {
+      const f = await fixture();
+      try {
+        const skill = join(f.userHome, '.agents', 'skills', skillName, 'SKILL.md');
+        await mkdir(join(f.userHome, '.agents', 'skills', skillName), {recursive: true});
+        await writeFile(skill, 'Unrelated user skill.\n');
+        for (const options of [['--dry-run'], []]) {
+          await expect(
+            f.run(['bootstrap', '--remote', f.remote, '--team', 'personal', ...options]),
+          ).rejects.toMatchObject({
+            stderr: expect.stringContaining('not managed by Threadnote'),
+          });
+          await expect(readFile(join(f.home, 'share', 'teams.json'))).rejects.toMatchObject({code: 'ENOENT'});
+          await expect(readFile(join(f.home, 'codex-cloud', 'profile.json'))).rejects.toMatchObject({code: 'ENOENT'});
+          expect(await readFile(skill, 'utf8')).toBe('Unrelated user skill.\n');
+        }
+      } finally {
+        await rm(f.root, {recursive: true, force: true});
       }
+    },
+    30_000,
+  );
+
+  it('prepares a reusable structural graph, detects source changes, and refreshes it at startup', async () => {
+    const f = await fixture();
+    const repo = join(f.root, 'source');
+    try {
+      await exec('git', ['init', '--initial-branch=main', repo]);
+      await exec('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/threadnote/source.git']);
+      const source = join(repo, 'greeting.ts');
+      await writeFile(source, 'export function greeting() { return "hello"; }\n');
+      const commit = async () => {
+        await exec('git', ['-C', repo, 'add', '.']);
+        await exec('git', ['-C', repo, 'commit', '-m', 'Source fixture'], {env: {...process.env, ...gitIdentity}});
+      };
+      await commit();
+      await f.run(['bootstrap', '--remote', f.remote, '--team', 'personal', '--cwd', repo, '--dry-run']);
+      await expect(readFile(join(f.home, 'codex-cloud', 'profile.json'))).rejects.toMatchObject({code: 'ENOENT'});
+      await f.run(['bootstrap', '--remote', f.remote, '--team', 'personal', '--cwd', repo]);
+      const first = parsed((await f.run(['verify', '--cwd', repo, '--json'])).stdout);
+      expect(first).toMatchObject({status: 'ok', graph: {freshness: 'current'}});
+      expect(first.graph?.snapshot?.id).toBeTruthy();
+      const unchanged = parsed((await f.run(['start', '--cwd', repo, '--json'])).stdout);
+      expect(unchanged.graph?.snapshot?.id).toBe(first.graph?.snapshot?.id);
+      expect((await f.cli(['graph', 'query', '--cwd', repo, '--query', 'greeting', '--json'])).stdout).toContain(
+        'greeting',
+      );
+      await f.run([
+        'remember',
+        '--project',
+        'source',
+        '--topic',
+        'greeting',
+        '--cwd',
+        repo,
+        '--code-ref',
+        'greeting.ts',
+        '--text',
+        'Greeting contract: return a friendly message.',
+      ]);
+      await f.run([
+        'remember',
+        '--kind',
+        'handoff',
+        '--project',
+        'source',
+        '--topic',
+        'greeting-task',
+        '--text',
+        'Task: greeting contract. Next step: preserve the friendly message.',
+      ]);
+      const teams = JSON.parse(await readFile(join(f.home, 'share', 'teams.json'), 'utf8'));
+      const shared = await readFile(
+        join(teams.teams.personal.worktree, 'durable', 'projects', 'source', 'greeting.md'),
+        'utf8',
+      );
+      for (const parts of [
+        ['durable'],
+        ['shared', 'unconfigured', 'durable'],
+        ['shared', 'personal-other', 'durable'],
+      ]) {
+        const outside = join(
+          f.home,
+          'data',
+          'local',
+          'user',
+          'codex-cloud',
+          'memories',
+          ...parts,
+          'projects',
+          'source',
+        );
+        await mkdir(outside, {recursive: true});
+        await writeFile(
+          join(outside, 'outside.md'),
+          shared.replace('return a friendly message.', 'OUTSIDE_SCOPE_MARKER.'),
+        );
+      }
+      for (const args of [[], ['--code-ref', 'greeting.ts']]) {
+        const brief = await f.run(['brief', '--cwd', repo, '--task', 'greeting contract', '--json', ...args]);
+        expect(brief.stdout).toContain('greeting');
+        expect(brief.stdout).toContain('Greeting contract: return a friendly message.');
+        expect(brief.stdout).toContain('preserve the friendly message.');
+        expect(brief.stdout).not.toContain('OUTSIDE_SCOPE_MARKER');
+        expect(brief.stdout).not.toContain('/shared/unconfigured/');
+        if (args.length > 0) expect(JSON.parse(brief.stdout).coverage.memory.codeAnchors.matchedMemories).toBe(1);
+      }
+      await expect(
+        f.run(['brief', '--cwd', repo, '--task', 'greeting', '--team', 'unconfigured']),
+      ).rejects.toMatchObject({
+        stderr: expect.stringContaining('outside the configured'),
+      });
+      await writeFile(source, 'export function farewell() { return "goodbye"; }\n');
+      await commit();
+      await expect(f.run(['verify', '--cwd', repo, '--json'])).rejects.toMatchObject({
+        stdout: expect.stringContaining('"status":"fail"'),
+      });
+      const refreshed = parsed((await f.run(['start', '--cwd', repo, '--json'])).stdout);
+      expect(refreshed).toMatchObject({status: 'ok', graph: {freshness: 'current'}});
+      expect(refreshed.graph?.snapshot?.id).not.toBe(first.graph?.snapshot?.id);
+      expect((await exec('git', ['-C', repo, 'status', '--porcelain'])).stdout).toBe('');
+      const tree = (await exec('git', ['--git-dir', f.remote, 'ls-tree', '-r', '--name-only', 'main'])).stdout;
+      expect(tree).not.toMatch(/greeting\.ts|graph|sqlite/iu);
+      await expect(f.run(['start', '--cwd', 'relative-source', '--json'])).rejects.toMatchObject({
+        stderr: expect.stringContaining('absolute'),
+      });
     } finally {
       await rm(f.root, {recursive: true, force: true});
     }
-  }, 30_000);
+  }, 90_000);
+
+  it('preserves subdirectory graph selection in a configured monorepo', async () => {
+    const f = await fixture();
+    const repo = join(f.root, 'monorepo');
+    const manifest = join(f.home, 'seed-manifest.yaml');
+    try {
+      for (const name of ['a', 'b']) {
+        const directory = join(repo, 'apps', name);
+        await mkdir(directory, {recursive: true});
+        await writeFile(join(directory, 'package.json'), JSON.stringify({name: `@fixture/${name}`}));
+        await writeFile(join(directory, 'index.ts'), `export const ${name} = true;\n`);
+      }
+      await writeFile(join(repo, 'package.json'), JSON.stringify({private: true, workspaces: ['apps/*']}));
+      await exec('git', ['init', '--initial-branch=main', repo]);
+      await exec('git', ['-C', repo, 'add', '.']);
+      await exec('git', ['-C', repo, 'commit', '-m', 'Monorepo fixture'], {env: {...process.env, ...gitIdentity}});
+      await mkdir(f.home, {recursive: true});
+      await writeFile(
+        manifest,
+        [
+          'version: 1',
+          'projects:',
+          ...['a', 'b'].flatMap(name => [
+            `  - name: ${name}`,
+            `    path: ${repo}`,
+            '    seed: []',
+            `    uri: threadnote://resources/repos/${name}`,
+            '    graph:',
+            '      closure: dependencies',
+            `      roots: [apps/${name}]`,
+          ]),
+          '',
+        ].join('\n'),
+      );
+      for (const name of ['a', 'b']) {
+        const flags = ['--cwd', join(repo, 'apps', name), '--manifest', manifest];
+        await f.run(['bootstrap', '--remote', f.remote, '--team', 'personal', ...flags]);
+        const verified = JSON.parse((await f.run(['verify', '--json', ...flags])).stdout);
+        expect(verified).toMatchObject({status: 'ok', graph: {freshness: 'current', projectCoverage: {project: name}}});
+        const started = JSON.parse((await f.run(['start', '--json', ...flags])).stdout);
+        expect(started.graph.snapshot.id).toBe(verified.graph.snapshot.id);
+      }
+      await expect(f.run(['verify', '--json', '--cwd', repo, '--manifest', manifest])).rejects.toMatchObject({
+        stderr: expect.stringContaining('Graph scope is ambiguous'),
+      });
+    } finally {
+      await rm(f.root, {recursive: true, force: true});
+    }
+  }, 60_000);
 
   it('waits for a concurrent process to finish its shared repository write before startup refresh', async () => {
     const f = await fixture();

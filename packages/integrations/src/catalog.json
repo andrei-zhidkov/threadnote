@@ -36,7 +36,7 @@
     {
       "id": "codex-cloud",
       "agentId": "codex",
-      "displayName": "Codex Cloud (personal memory)",
+      "displayName": "Codex Cloud (personal memory and graph)",
       "tier": "manual",
       "aliases": [],
       "scopes": ["user"],
@@ -71,10 +71,10 @@
         "Only local fixtures have been verified; a real published-environment cross-task smoke remains required."
       ],
       "setup": [
-        "Run threadnote cloud codex bootstrap --remote <credential-free-url> --team <name> in the Install script.",
+        "Run threadnote cloud codex bootstrap --remote <credential-free-url> --team <name> --cwd <absolute-checkout> in the Install script.",
         "Use the installed threadnote-start-skill.md as the Start skill and publish the environment."
       ],
-      "verification": "Run cloud codex start and verify --json in a fresh task; confirm startup skill loading and recall/read a durable write from a second fresh task."
+      "verification": "Run cloud codex start --cwd <absolute-checkout> and verify --cwd <absolute-checkout> --json in a fresh task; confirm three skills load, query the local structural graph, and recall/read a durable write from a second fresh task."
     },
     {
       "id": "claude-code",

@@ -32,7 +32,7 @@ import {readFileIfExists} from '../utils.js';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {resolveAgentHostPaths} from './host_paths.js';
 import {LEGACY_ARTIFACT_TARGETS as HOST_TARGETS} from './adapters/legacy_targets.js';
-import {AGENT_SKILLS, CURSOR_CLOUD_PERSONAL_AGENT_SKILLS} from './skills.js';
+import {AGENT_SKILLS, CODEX_CLOUD_PERSONAL_AGENT_SKILLS, CURSOR_CLOUD_PERSONAL_AGENT_SKILLS} from './skills.js';
 
 interface InstallAgentIntegrationOptions {
   readonly cwd?: string;
@@ -408,7 +408,12 @@ function agentArtifacts(agent: AgentClient, requestedProfile?: AgentArtifactProf
           },
         ];
     const skillRoot = ompPaths?.skillRoot ?? (yield* expandPath(host!.skillRoot));
-    const skills = profile === 'default' ? AGENT_SKILLS : CURSOR_CLOUD_PERSONAL_AGENT_SKILLS;
+    const skills =
+      profile === 'default'
+        ? AGENT_SKILLS
+        : profile === 'codex-cloud-personal'
+          ? CODEX_CLOUD_PERSONAL_AGENT_SKILLS
+          : CURSOR_CLOUD_PERSONAL_AGENT_SKILLS;
     for (const skill of skills) {
       const content = `${(yield* (yield* FileSystem.FileSystem).readFileString(
         path.join(profileRoot, 'agent-skills', skill, 'SKILL.md'),

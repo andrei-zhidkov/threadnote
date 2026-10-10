@@ -594,6 +594,7 @@ bun_test(
         "//apps/threadnote:src/code_graph/sharing/publisher.ts",
         "//apps/threadnote:src/code_graph/view_removal_output.ts",
         "//apps/threadnote:src/code_graph/workset/telemetry.ts",
+        "//apps/threadnote:src/codex/brief.ts",
         "//apps/threadnote:src/codex/cloud.ts",
         "//apps/threadnote:src/codex/hooks.ts",
         "//apps/threadnote:src/codex/memory.ts",

@@ -460,6 +460,7 @@ bun_workspace_test(
         "//assets:brand/threadnote-wordmark.svg",
         "//config:agent-instructions.md",
         "//config:agent-profiles/codex-cloud-personal/agent-instructions.md",
+        "//config:agent-profiles/codex-cloud-personal/agent-skills/threadnote-code-graph/SKILL.md",
         "//config:agent-profiles/codex-cloud-personal/agent-skills/threadnote-context/SKILL.md",
         "//config:agent-profiles/codex-cloud-personal/agent-skills/threadnote-memory/SKILL.md",
         "//config:agent-profiles/codex-cloud-personal/start-skill.md",

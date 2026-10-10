@@ -129,9 +129,15 @@ effectIt.effect('Codex Cloud repairs and removes CLI-only managed artifacts whil
     expect(repairableAgentClients(yield* readAgentIntegrationRegistry(config))).toEqual([]);
     const template = path.join(codexRoot, 'threadnote-start-skill.md');
     expect(yield* fs.readFileString(template)).toContain('threadnote-context/SKILL.md');
+    expect(yield* fs.readFileString(template)).toContain('threadnote-code-graph/SKILL.md');
+    expect(yield* fs.readFileString(template)).toContain('--cwd "$PWD"');
+    const graphSkill = path.join(userHome, '.agents', 'skills', 'threadnote-code-graph', 'SKILL.md');
+    expect(yield* fs.readFileString(graphSkill)).toContain('threadnote graph');
     yield* fs.remove(template);
+    yield* fs.remove(graphSkill);
     yield* repairAgentIntegrations(config, false).pipe(Effect.provideService(SystemInfo, testSystem));
     expect(yield* fs.exists(template)).toBe(true);
+    expect(yield* fs.exists(graphSkill)).toBe(true);
     expect(
       (yield* agentIntegrationDoctorChecks(config).pipe(Effect.provideService(SystemInfo, testSystem))).every(
         check => check.status === 'ok',
@@ -148,6 +154,7 @@ effectIt.effect('Codex Cloud repairs and removes CLI-only managed artifacts whil
     yield* removeAgentIntegrations(config, false).pipe(Effect.provideService(SystemInfo, testSystem));
     expect(yield* fs.readFileString(instruction)).toBe('Existing personal guidance.\n');
     expect(yield* fs.exists(template)).toBe(false);
+    expect(yield* fs.exists(graphSkill)).toBe(false);
     expect(yield* fs.exists(path.join(userHome, '.agents', 'skills', 'threadnote-context', 'SKILL.md'))).toBe(false);
   }).pipe(
     provideTestLayer(

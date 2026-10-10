@@ -16,15 +16,19 @@ import {
   runCodexCloudVerify,
 } from '../codex/cloud.js';
 import {runCodexCloudMemory} from '../codex/memory.js';
+import {runCodexCloudBrief} from '../codex/brief.js';
 
 export function makeCodexCloudCommand(withRuntime: CliRuntimeRunner) {
   const json = () => boolean('json', 'Print machine-readable output; diagnostics use stderr');
   const team = () =>
     optionalString('team', 'Configured memory share; required for new durable writes with multiple shares');
+  const cwd = () =>
+    optionalString('cwd', 'Absolute source checkout path for structural graph preparation or verification');
   const bootstrap = Command.make(
     'bootstrap',
     {
       agentId: optionalString('agent-id', 'Stable agent identity; defaults to codex-cloud'),
+      cwd: cwd(),
       dryRun: boolean('dry-run', 'Preview without changing local or remote state'),
       remote: requiredString('remote', 'Credential-free private Git memory repository URL'),
       team: team(),
@@ -32,11 +36,11 @@ export function makeCodexCloudCommand(withRuntime: CliRuntimeRunner) {
     },
     options => withRuntime(config => runCodexCloudBootstrap(codexCloudRuntimeConfig(config, options), options)),
   );
-  const start = Command.make('start', {json: json()}, options =>
-    withRuntime(config => runCodexCloudStart(config, options.json)),
+  const start = Command.make('start', {cwd: cwd(), json: json()}, options =>
+    withRuntime(config => runCodexCloudStart(config, options.json, options.cwd)),
   );
-  const verify = Command.make('verify', {json: json()}, options =>
-    withRuntime(config => runCodexCloudVerify(config, options.json)),
+  const verify = Command.make('verify', {cwd: cwd(), json: json()}, options =>
+    withRuntime(config => runCodexCloudVerify(config, options.json, options.cwd)),
   );
   const recall = Command.make(
     'recall',
@@ -50,6 +54,27 @@ export function makeCodexCloudCommand(withRuntime: CliRuntimeRunner) {
       uri: optionalString('uri', 'Scope subtree inside a configured share'),
     },
     ({json, ...options}) => withRuntime(config => runCodexCloudMemory(config, 'recall', options, json)),
+  );
+  const brief = Command.make(
+    'brief',
+    {
+      budgetTokens: optionalString('budget-tokens', 'Context Brief budget from 800 to 1500 tokens'),
+      codeRefs: repeatedString('code-ref', 'Repository-relative graph path or local cgs_ handle; max 8'),
+      cwd: requiredString('cwd', 'Absolute current checkout path'),
+      detail: optionalChoice('detail', ['compact', 'source'], 'Compact cards or exact-current source excerpts'),
+      json: json(),
+      mode: optionalChoice('mode', ['brief', 'locate', 'explain', 'trace', 'impact', 'resume'], 'Context Brief mode'),
+      project: optionalString('project', 'Configured graph project; omit to infer from cwd'),
+      task: requiredString('task', 'Current task or question'),
+      team: team(),
+    },
+    ({budgetTokens, ...options}) =>
+      withRuntime(config =>
+        runCodexCloudBrief(config, {
+          ...options,
+          budgetTokens: budgetTokens === undefined ? undefined : Number(budgetTokens),
+        }),
+      ),
   );
   const read = Command.make(
     'read',
@@ -86,6 +111,7 @@ export function makeCodexCloudCommand(withRuntime: CliRuntimeRunner) {
     'remember',
     {
       callerCwd: optionalString('cwd', 'Absolute current checkout path'),
+      codeRefs: repeatedString('code-ref', 'Current source path or graph handle; repeat for up to 8 citations'),
       json: json(),
       kind: defaultChoice('kind', ['durable', 'handoff'], 'Memory kind', 'durable'),
       project: optionalString('project', 'Project namespace'),
@@ -107,7 +133,7 @@ export function makeCodexCloudCommand(withRuntime: CliRuntimeRunner) {
       ),
   );
   return Command.make('codex').pipe(
-    Command.withDescription('Personal Git memory for published Codex Cloud environments'),
-    Command.withSubcommands([bootstrap, start, verify, recall, read, list, remember]),
+    Command.withDescription('Personal Git memory and local code graphs for published Codex Cloud environments'),
+    Command.withSubcommands([bootstrap, start, verify, brief, recall, read, list, remember]),
   );
 }

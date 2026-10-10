@@ -2676,7 +2676,7 @@ Measure the system before changing its implementation language.
     ).toBe('personal-cursor-cloud');
   });
 
-  it('documents published Codex Cloud CLI memory with explicit startup skill loading', () => {
+  it('documents scoped Codex Cloud briefs, graph startup, and optional Knowledge Delta approval', () => {
     const article = docsSections
       .flatMap(section => section.articles)
       .find(candidate => candidate.id === 'personal-codex-cloud');
@@ -2687,7 +2687,14 @@ Measure the system before changing its implementation language.
       'Start skill',
       'cloud codex bootstrap',
       'cloud codex start',
-      'cloud codex verify --json',
+      'cloud codex verify --cwd',
+      'cloud codex brief',
+      'Knowledge Delta',
+      'verificationPerformed',
+      'knowledgeInvalidated',
+      'unresolvedRisks',
+      'explicit approve, defer, or reject',
+      'threadnote-code-graph/SKILL.md',
       'cloud codex recall',
       'cloud codex remember',
       'threadnote-context/SKILL.md',
@@ -2699,7 +2706,6 @@ Measure the system before changing its implementation language.
       'never embed tokens',
     ])
       expect(content).toContain(expected);
-    expect(content).not.toContain('threadnote-code-graph/SKILL.md');
     expect(
       searchDocs(createDocsSearchIndex(docsSections), 'personal Codex Cloud published environment')[0]?.article.id,
     ).toBe('personal-codex-cloud');
