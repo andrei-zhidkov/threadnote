@@ -1,4 +1,5 @@
 import React, {useEffect, useState} from 'react';
+import {formatRelativeAge, useRelativeTimeNow} from '../relative_time.js';
 import type {CodeGraphAutomaticCompactionStatus} from '@threadnote/graph/automatic/compaction';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
 import type {CodeGraphMaintenanceStatus} from '@threadnote/graph/maintenance/gate';
@@ -47,6 +48,9 @@ import {
   type GraphWorktreeAdministrationAction,
 } from './model.js';
 import {type ManagerDialogOptions, useOptionalManagerDialogs} from '@threadnote/manager/dialog';
+import {GraphReconciliationProgress} from './reconciliation.js';
+import type {ManagerGraphReconciliationStatus} from '@threadnote/graph/manager/status';
+export {GraphReconciliationProgress};
 
 export function GraphSummary(props: {
   readonly analysis?: GraphAnalysis;
@@ -469,7 +473,9 @@ export function GraphAdministration(props: {
   readonly onDiagnostics: (options: {readonly analyze: boolean; readonly deep: boolean}) => void;
   readonly output?: string;
   readonly report?: CodeGraphLocalDiagnosticsReport;
+  readonly reconciliation?: ManagerGraphReconciliationStatus;
 }): React.ReactElement {
+  const now = useRelativeTimeNow();
   const dialogs = useOptionalManagerDialogs();
   const [analyze, setAnalyze] = useState(false);
   const [deep, setDeep] = useState(false);
@@ -532,6 +538,7 @@ export function GraphAdministration(props: {
         </span>
       </summary>
       <div className="graph-administration-body">
+        {props.reconciliation ? <GraphReconciliationProgress status={props.reconciliation} /> : null}
         {props.configuredProjects === undefined ? null : (
           <section className="graph-configured-project-index">
             <header>
@@ -551,7 +558,7 @@ export function GraphAdministration(props: {
                   ) : (
                     props.configuredProjects.map(project => (
                       <option key={project.name} value={project.name}>
-                        {project.name} · {graphConfiguredProjectStateLabel(project.graphState)}
+                        {project.name}
                       </option>
                     ))
                   )}
@@ -794,6 +801,12 @@ export function GraphAdministration(props: {
                       });
                       const partialTopology = candidate.analysis?.coverage.topology.state === 'partial';
                       const boundedNodePrefix = partialTopology && !candidate.analysis?.coverage.nodesComplete;
+                      const createdAge = formatRelativeAge(candidate.snapshot.completedAt, now);
+                      const updatedAge = formatRelativeAge(candidate.activatedAt, now);
+                      const showUpdated =
+                        updatedAge &&
+                        (!createdAge ||
+                          Date.parse(candidate.activatedAt ?? '') > Date.parse(candidate.snapshot.completedAt ?? ''));
                       return (
                         <div
                           key={`${database.checkoutId}:${candidate.viewWorktreeId}:${candidate.viewScopeId ?? 'full-repository'}`}
@@ -805,6 +818,25 @@ export function GraphAdministration(props: {
                               props.configuredProjects,
                             )}
                           </strong>
+                          <div className="graph-snapshot-ages">
+                            {createdAge ? (
+                              <time
+                                dateTime={candidate.snapshot.completedAt}
+                                title={`Snapshot created: ${candidate.snapshot.completedAt}`}
+                              >
+                                Created {createdAge}
+                              </time>
+                            ) : null}
+                            {showUpdated ? (
+                              <time
+                                dateTime={candidate.activatedAt}
+                                title={`Worktree view last updated: ${candidate.activatedAt}`}
+                              >
+                                Updated {updatedAge}
+                              </time>
+                            ) : null}
+                            {!createdAge && !updatedAge ? <span>Time unavailable</span> : null}
+                          </div>
                           <span>
                             {candidate.snapshot.fileCount.toLocaleString()} files ·{' '}
                             {candidate.snapshot.symbolCount.toLocaleString()} symbols ·{' '}
@@ -817,6 +849,12 @@ export function GraphAdministration(props: {
                             Folder: {graphLocalAssociationText(candidate.localAssociation)} ·{' '}
                             {candidate.localAssociation.state}
                           </small>
+                          {candidate.localAssociation.state === 'missing' ? (
+                            <small className="graph-build-attention">
+                              Retained snapshot · recorded folder is missing. This does not establish a ready graph for
+                              another checkout.
+                            </small>
+                          ) : null}
                           {candidate.analysis ? (
                             <small>
                               {candidate.analysis.coverage.complete ? 'Complete' : 'Partial'} analysis ·{' '}
@@ -1020,17 +1058,6 @@ export function GraphAdministration(props: {
       </div>
     </details>
   );
-}
-
-function graphConfiguredProjectStateLabel(state: GraphConfiguredProject['graphState']): string {
-  switch (state) {
-    case 'not-indexed':
-      return 'needs initialization';
-    case 'ready':
-      return 'ready snapshot';
-    case 'unknown':
-      return 'ready state not shown';
-  }
 }
 
 function graphConfiguredProjectStateDetail(state: GraphConfiguredProject['graphState']): string {

@@ -7,6 +7,8 @@ import {
   formatMemoryDocument,
   formatMemoryDocumentWithKeywords,
   inferMemoryMetadata,
+  isAgentArtifactUri,
+  isAgentArtifactPath,
   isIsoDateOrCanonicalIsoInstant,
   memoryHeaderValue,
   parseMemoryDocument,
@@ -24,6 +26,28 @@ import {
 import {migrateMemoryDocumentV4ToV5} from '@threadnote/memory/migrations';
 
 describe('memory document contract', () => {
+  it('recognizes reserved artifact roots without treating a basename or nested directory as an artifact', () => {
+    for (const relative of [
+      'agent-artifacts',
+      'agent-artifacts/skills/claude/review-pr/SKILL.md',
+      'shared/default/agent-artifacts/packs/team/README.md',
+    ]) {
+      expect(isAgentArtifactUri(`threadnote://user/tester/memories/${relative}`)).toBe(true);
+      expect(isAgentArtifactUri(`viking://user/tester/memories/${relative}`)).toBe(true);
+    }
+    for (const relative of [
+      'durable/projects/test/SKILL.md',
+      'durable/agent-artifacts/bad.md',
+      'agent-artifacts-old/bad.md',
+      'shared/agent-artifacts/bad.md',
+    ])
+      expect(isAgentArtifactUri(`threadnote://user/tester/memories/${relative}`)).toBe(false);
+    expect(isAgentArtifactUri('file:///memories/agent-artifacts/skill.md')).toBe(false);
+    expect(isAgentArtifactPath(['agent-artifacts', 'skills', 'local?tool'])).toBe(true);
+    expect(isAgentArtifactPath(['shared', 'default', 'agent-artifacts', 'local?tool'])).toBe(true);
+    expect(isAgentArtifactPath(['durable', 'agent-artifacts', 'tool'])).toBe(false);
+  });
+
   it('projects constructed headers independently of field order, duplicates, empties and line endings (property)', () => {
     const citation = createMemoryCodeCitation(citationInput('src/header-property.ts'));
     const encoded = formatMemoryCodeCitation(citation);
@@ -348,9 +372,9 @@ describe('memory document contract', () => {
     const migrated = migrateMemoryDocumentV4ToV5(v4);
     const parsed = parseMemoryDocument('threadnote://user/me/migrated.md', migrated);
 
-    expect(migrated).toBe(v4.replace('schema_version: 4', `schema_version: ${MEMORY_SCHEMA_VERSION}`));
+    expect(migrated).toBe(v4.replace('schema_version: 4', 'schema_version: 5'));
     expect(migrateMemoryDocumentV4ToV5(migrated)).toBe(migrated);
-    expect(parsed?.metadata).toMatchObject({codeCitations: [citation], schemaVersion: MEMORY_SCHEMA_VERSION});
+    expect(parsed?.metadata).toMatchObject({codeCitations: [citation], schemaVersion: 5});
     expect(parsed?.metadata.owner).toBeUndefined();
     expect(parsed?.metadata.reviewAfter).toBeUndefined();
   });
@@ -375,7 +399,7 @@ describe('memory document contract', () => {
 
         expect(migrateMemoryDocumentV4ToV5(v4)).toBe(migrated);
         expect(migrateMemoryDocumentV4ToV5(migrated)).toBe(migrated);
-        expect(parsed?.metadata.schemaVersion).toBe(MEMORY_SCHEMA_VERSION);
+        expect(parsed?.metadata.schemaVersion).toBe(5);
         expect(parsed?.metadata.owner).toBeUndefined();
         expect(parsed?.metadata.reviewAfter).toBeUndefined();
         expect(parsed?.body).toBe(body.replace(/\r\n?/gu, '\n').trim());

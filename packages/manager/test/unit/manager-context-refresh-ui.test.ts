@@ -85,7 +85,7 @@ it.each(['Repository', 'Workset'])('clears a removed %s selection before compili
     select.dispatchEvent(new Event('change', {bubbles: true}));
   });
   const compileButton = () =>
-    [...document.querySelectorAll('button')].find(button => button.textContent === 'Compile Context Brief');
+    [...document.querySelectorAll('button')].find(button => button.textContent === 'Build brief');
   expect(compileButton()?.disabled).toBe(false);
 
   projects = ['replacement'];
@@ -118,7 +118,7 @@ it('refreshes Context choices through the Manager button while preserving a vali
   container.id = 'root';
   document.body.append(container);
   await act(async () => {
-    await import('@threadnote/manager/ui');
+    (await import('@threadnote/manager/ui')).mountManager({integrations: []});
   });
   await click('Context');
   expect(repositoryPaths()).toEqual(['']);

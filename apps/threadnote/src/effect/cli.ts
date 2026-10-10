@@ -1,4 +1,5 @@
 import {makeCodexCloudCommand} from './codex_cloud_cli.js';
+import {sourceAddFlags} from '../integrations/cli.js';
 import {makeContextRuntimeCommand} from './context_cli.js';
 import {makeCompactCommand, makeRecallFeedbackCommand, makeValueCommand} from './workflow_cli.js';
 import * as hooksCli from './hooks_cli.js';
@@ -59,8 +60,8 @@ import {makeCloseoutCommand} from './closeout_cli.js';
 import {wakeContextMaintenance} from '../memory/context/maintenance.js';
 import {runProcedurePublish, runProcedureStatus, runProcedureVerify} from '../procedure/commands.js';
 import {runMcpInstall} from '../mcp/index.js';
-import {runObsidianInboxScan} from '../obsidian/inbox.js';
-import {runObsidianOpen} from '../obsidian/open.js';
+import {runObsidianInboxScan} from '@threadnote/integration-obsidian/inbox';
+import {runObsidianOpen} from '../integrations/obsidian/open.js';
 import {
   runObsidianProjectionAdd,
   runObsidianProjectionList,
@@ -68,15 +69,15 @@ import {
   runObsidianProjectionRemove,
   runObsidianProjectionStatus,
   runObsidianProjectionSync,
-} from '../obsidian/projection.js';
+} from '@threadnote/integration-obsidian/projection';
 import {
-  runObsidianSourceAdd,
-  runObsidianSourceInventory,
-  runObsidianSourceList,
-  runObsidianSourceRemove,
-  runObsidianSourceStatus,
-  runObsidianSourceSync,
-} from '../obsidian/source.js';
+  runSourceAdd,
+  runSourceInventory,
+  runSourceList,
+  runSourceRemove,
+  runSourceStatus,
+  runSourceSync,
+} from '../integrations/source.js';
 import {ensureUserManifestRuntimeConfig, getRuntimeConfig} from '../runtime.js';
 import {runInitManifest, runSeed, runSeedSkills} from '../seeding.js';
 import {makeWorksetCommand} from './workset_cli.js';
@@ -1037,26 +1038,17 @@ const graphCommand = Command.make('graph').pipe(
   ]),
 );
 
-const sourceAdd = Command.make(
-  'add',
-  {
-    apply: boolean('apply', 'Write the source configuration; without this, print a preview'),
-    exclude: repeatedString('exclude', 'Vault-relative exclusion glob; repeat for multiple'),
-    id: requiredString('id', 'Stable source identifier'),
-    inbox: optionalString('inbox', 'Vault-relative Threadnote Inbox folder'),
-    include: repeatedString('include', 'Required vault-relative allowlist glob; repeat for multiple'),
-    type: defaultChoice('type', ['obsidian'], 'External source type', 'obsidian'),
-    vault: requiredString('vault', 'Obsidian vault directory'),
-  },
-  ({type: _type, ...options}) => withRuntimeEffect(config => runObsidianSourceAdd(config, options)),
+const sourceAdd = Command.make('add', sourceAddFlags, options =>
+  withRuntimeEffect(config =>
+    runSourceAdd(config, {...options, pages: options.pages.length ? options.pages : undefined}),
+  ),
 ).pipe(Command.withDescription('Configure an allowlisted read-only external source'));
 
-const sourceList = Command.make('list', {}, () => withRuntimeEffect(config => runObsidianSourceList(config))).pipe(
+const sourceList = Command.make('list', {}, () => withRuntimeEffect(config => runSourceList(config))).pipe(
   Command.withDescription('List configured external sources'),
 );
-
 const sourceInventory = Command.make('inventory', {id: argument('id', 'Source identifier')}, ({id}) =>
-  withRuntimeEffect(config => runObsidianSourceInventory(config, id)),
+  withRuntimeEffect(config => runSourceInventory(config, id)),
 ).pipe(Command.withDescription('Inventory allowed, changed, removed, and unsafe source notes'));
 
 const sourceSync = Command.make(
@@ -1066,11 +1058,11 @@ const sourceSync = Command.make(
     apply: boolean('apply', 'Update the external index; without this, print a dry run'),
     dryRun: boolean('dry-run', 'Print changes without updating the external index'),
   },
-  options => withRuntimeEffect(config => runObsidianSourceSync(config, options)),
+  options => withRuntimeEffect(config => runSourceSync(config, options)),
 ).pipe(Command.withDescription('Incrementally synchronize an allowlisted external source'));
 
 const sourceStatus = Command.make('status', {id: argument('id', 'Source identifier')}, ({id}) =>
-  withRuntimeEffect(config => runObsidianSourceStatus(config, id)),
+  withRuntimeEffect(config => runSourceStatus(config, id)),
 ).pipe(Command.withDescription('Show source configuration and pending changes'));
 
 const sourceRemove = Command.make(
@@ -1080,7 +1072,7 @@ const sourceRemove = Command.make(
     apply: boolean('apply', 'Remove source configuration and its external index'),
     dryRun: boolean('dry-run', 'Print removal without changing anything'),
   },
-  options => withRuntimeEffect(config => runObsidianSourceRemove(config, options)),
+  options => withRuntimeEffect(config => runSourceRemove(config, options)),
 ).pipe(Command.withDescription('Remove a source index while preserving its vault and Threadnote memories'));
 
 const source = Command.make('source').pipe(
@@ -1486,6 +1478,11 @@ const handoff = Command.make(
     ),
     dryRun: boolean('dry-run', 'Print handoff without storing'),
     issue: optionalString('issue', 'Related issue reference'),
+    keyword: repeatedString(
+      'keyword',
+      'Explicit search keyword; repeat for multiple. Handoffs never generate keywords.',
+      32,
+    ),
     nextStep: optionalString('next-step', 'Suggested next step'),
     pr: optionalString('pr', 'Related pull request reference'),
     project: optionalString('project', 'Project/repo namespace; defaults to current repo'),
@@ -1505,7 +1502,14 @@ const handoff = Command.make(
     timestamped: boolean('timestamped', 'Store a historical timestamped handoff'),
     topic: optionalString('topic', 'Stable topic name'),
   },
-  options => withMutationRuntimeEffect(config => runHandoff(config, {...options, references: options.reference})),
+  ({keyword, ...options}) =>
+    withMutationRuntimeEffect(config =>
+      runHandoff(config, {
+        ...options,
+        ...(keyword.length > 0 ? {keywords: [...keyword]} : {}),
+        references: options.reference,
+      }),
+    ),
 ).pipe(Command.withDescription('Capture current repo state as a durable cross-agent handoff memory'));
 
 const archive = Command.make(
@@ -1863,7 +1867,7 @@ const registerTopLevelCommand = <const Name extends string, CommandType>(
 });
 
 const topLevelCommandRegistrations = [
-  registerTopLevelCommand('setup', makeSetupCommand(withScopedRuntime), setupCommandMetadata),
+  registerTopLevelCommand('setup', makeSetupCommand(withRuntimeEffect), setupCommandMetadata),
   registerTopLevelCommand('activate', makeActivationCommand(withScopedRuntime)),
   registerTopLevelCommand('guidance', makeGuidanceCommand(withScopedRuntime), guidanceCommandMetadata),
   registerTopLevelCommand('agents', makeAgentsCommand(withScopedRuntime), agentsCommandMetadata),

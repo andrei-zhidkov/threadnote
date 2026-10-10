@@ -10,7 +10,8 @@ import {
   repairAgentIntegrations,
 } from '@threadnote/threadnote/agent_integration/index';
 import {repairableAgentClients} from '@threadnote/threadnote/agent_integration/registry';
-import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {removeMcpConfigs} from '@threadnote/threadnote/mcp/install';
+import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -112,7 +113,7 @@ effectIt.effect('Codex Cloud repairs and removes CLI-only managed artifacts whil
     const testSystem = SystemInfo.of({
       ...system,
       homeDirectory: userHome,
-      environment: () => ({...system.environment(), CODEX_HOME: codexRoot}),
+      environment: () => ({...system.environment(), CODEX_HOME: codexRoot, PATH: ''}),
     });
     const instruction = path.join(codexRoot, 'AGENTS.md');
     yield* fs.makeDirectory(codexRoot, {recursive: true});
@@ -137,9 +138,20 @@ effectIt.effect('Codex Cloud repairs and removes CLI-only managed artifacts whil
       ),
     ).toBe(true);
     expect(yield* fs.exists(path.join(codexRoot, 'config.toml'))).toBe(false);
+    for (const dryRun of [true, false]) {
+      expect(
+        yield* removeMcpConfigs('codex', dryRun, {codex: receipt.mcp}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        ),
+      ).toEqual(['codex']);
+    }
     yield* removeAgentIntegrations(config, false).pipe(Effect.provideService(SystemInfo, testSystem));
     expect(yield* fs.readFileString(instruction)).toBe('Existing personal guidance.\n');
     expect(yield* fs.exists(template)).toBe(false);
     expect(yield* fs.exists(path.join(userHome, '.agents', 'skills', 'threadnote-context', 'SKILL.md'))).toBe(false);
-  }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  }).pipe(
+    provideTestLayer(
+      TestCommandExecutorLayer.pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(BunServices.layer)),
+    ),
+  ),
 );

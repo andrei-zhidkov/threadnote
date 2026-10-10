@@ -3,6 +3,7 @@ import {chmod, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testin
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
+import {TestError} from '@threadnote/testing/test-error';
 import {describe, expect, it} from 'vitest';
 
 const exec = promisify(execFile);
@@ -60,6 +61,74 @@ function parsed(stdout: string) {
 }
 
 describe('Codex Cloud CLI integration', () => {
+  it('rejects unowned artifacts before previewing or creating a Git share', async () => {
+    const f = await fixture();
+    try {
+      const skill = join(f.userHome, '.agents', 'skills', 'threadnote-context', 'SKILL.md');
+      await mkdir(join(f.userHome, '.agents', 'skills', 'threadnote-context'), {recursive: true});
+      await writeFile(skill, 'Unrelated user skill.\n');
+      for (const options of [['--dry-run'], []]) {
+        await expect(
+          f.run(['bootstrap', '--remote', f.remote, '--team', 'personal', ...options]),
+        ).rejects.toMatchObject({
+          stderr: expect.stringContaining('not managed by Threadnote'),
+        });
+        await expect(readFile(join(f.home, 'share', 'teams.json'))).rejects.toMatchObject({code: 'ENOENT'});
+        await expect(readFile(join(f.home, 'codex-cloud', 'profile.json'))).rejects.toMatchObject({code: 'ENOENT'});
+        expect(await readFile(skill, 'utf8')).toBe('Unrelated user skill.\n');
+      }
+    } finally {
+      await rm(f.root, {recursive: true, force: true});
+    }
+  }, 30_000);
+
+  it('waits for a concurrent process to finish its shared repository write before startup refresh', async () => {
+    const f = await fixture();
+    let owner: ReturnType<typeof Bun.spawn> | undefined;
+    let startup: Promise<unknown> | undefined;
+    const release = join(f.root, 'lock-owner.release');
+    try {
+      await f.bootstrap();
+      const teams = JSON.parse(await readFile(join(f.home, 'share', 'teams.json'), 'utf8'));
+      const ready = join(f.root, 'lock-owner.ready');
+      const helper = join(import.meta.dirname, '../helpers/codex-cloud-lock-owner.ts');
+      owner = Bun.spawn({
+        cmd: [process.execPath, helper, f.home, ready, release, join(teams.teams.personal.worktree, 'README.md')],
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      await expect
+        .poll(
+          async () => {
+            if (owner!.exitCode !== null) {
+              throw TestError.make({message: `Lock owner exited before becoming ready: ${owner!.exitCode}`});
+            }
+            return Bun.file(ready).exists();
+          },
+          {timeout: 10_000},
+        )
+        .toBe(true);
+      const pending = f.run(['start', '--json']).then(
+        result => ({result}),
+        error => ({error}),
+      );
+      startup = pending;
+      expect(await Promise.race([pending, Bun.sleep(2_000).then(() => undefined)])).toBeUndefined();
+      await writeFile(release, 'release');
+      expect(await owner.exited).toBe(0);
+      expect(await pending).toMatchObject({result: {stdout: expect.stringContaining('"status":"ok"')}});
+    } finally {
+      await writeFile(release, 'release');
+      if (owner) {
+        const exited = await Promise.race([owner.exited, Bun.sleep(5_000).then(() => undefined)]);
+        if (exited === undefined) owner.kill(9);
+        await owner.exited;
+      }
+      await startup;
+      await rm(f.root, {recursive: true, force: true});
+    }
+  }, 45_000);
+
   it('keeps dry run inert, reuses bootstrap, persists identity, and verifies missing artifacts', async () => {
     const f = await fixture();
     try {

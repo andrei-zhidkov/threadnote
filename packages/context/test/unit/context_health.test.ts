@@ -11,6 +11,13 @@ import {
 import type {ContextBriefCitationValidationReceiptV2} from '@threadnote/context/types';
 import {createMemoryCodeCitation, preserveMemoryCodeCitationAnchor} from '@threadnote/memory/code/citation';
 import {buildContextHealthReport} from '@threadnote/context/health';
+import {
+  analyzeContextHealthSemantics,
+  compareContextHealthSemanticClaims,
+  compareContextHealthSemanticClaimWindow,
+  extractContextHealthSemanticClaims,
+  findContextHealthSemanticContradiction,
+} from '@threadnote/context/health_semantic';
 
 const now = new Date('2026-09-17T12:00:00.000Z');
 
@@ -44,6 +51,104 @@ function record(uri: string, body: string, metadata: Partial<MemoryMetadata> = {
 }
 
 describe('buildContextHealthReport', () => {
+  it('reaches a contradiction after the direct per-record claim limit and rechecks its exact source pair', () => {
+    const filler = Array.from(
+      {length: 17},
+      (_, index) => `Worker ${String.fromCharCode(97 + index)} must retain verified context.`,
+    );
+    const candidates = Array.from(
+      {length: 100},
+      (_, index) =>
+        `Deployment policy${String.fromCharCode(97 + Math.floor(index / 26))}${String.fromCharCode(97 + (index % 26))}`,
+    );
+    const subject = candidates.find(candidate => {
+      const source = record('threadnote://memory/a', [...filler, `${candidate} must use signed artifacts.`].join('\n'));
+      return (
+        extractContextHealthSemanticClaims(source).claims.findIndex(claim => claim.text.startsWith(candidate)) >= 16
+      );
+    })!;
+    const left = record('threadnote://memory/a', [...filler, `${subject} must use signed artifacts.`].join('\n'));
+    const right = record('threadnote://memory/z', `${subject} must not use signed artifacts.`);
+    const before = [left.content, right.content];
+    expect(analyzeContextHealthSemantics({project: 'threadnote', records: [left, right]}).contradictions).toHaveLength(
+      0,
+    );
+    const extracted = extractContextHealthSemanticClaims(left);
+    expect(extracted.claims).toHaveLength(18);
+    expect(extracted.reasons).not.toContain('claim-limit');
+    const evidence = compareContextHealthSemanticClaims(
+      extracted.claims.find(claim => claim.text.startsWith(subject))!,
+      extractContextHealthSemanticClaims(right).claims[0],
+    )!;
+    expect(
+      findContextHealthSemanticContradiction([left, right], evidence.contradictionId, [
+        evidence.left.claimFingerprint,
+        evidence.right.claimFingerprint,
+      ]),
+    ).toEqual(evidence);
+    expect([left.content, right.content]).toEqual(before);
+  });
+
+  it('compares the exhaustive claim domain across bounded pages and serialized restarts', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.boolean(), {minLength: 1, maxLength: 8}),
+        fc.array(fc.boolean(), {minLength: 1, maxLength: 8}),
+        fc.integer({min: 1, max: 7}),
+        (leftPolarity, rightPolarity, limit) => {
+          const make = (uri: string, denied: readonly boolean[]) =>
+            record(uri, denied.map(value => `Agents must ${value ? 'not ' : ''}load verified context.`).join('\n'));
+          const left = make('threadnote://memory/a', leftPolarity);
+          const right = make('threadnote://memory/b', rightPolarity);
+          const before = [left.content, right.content];
+          const a = extractContextHealthSemanticClaims(left).claims;
+          const b = extractContextHealthSemanticClaims(right).claims;
+          const expected =
+            leftPolarity.filter(Boolean).length * rightPolarity.filter(value => !value).length +
+            leftPolarity.filter(value => !value).length * rightPolarity.filter(Boolean).length;
+          const found = new Set<string>();
+          let cursor = 0;
+          while (cursor < a.length * b.length) {
+            const page = compareContextHealthSemanticClaimWindow(a, b, cursor, limit);
+            for (const evidence of page.contradictions) found.add(evidence.contradictionId);
+            cursor = JSON.parse(JSON.stringify(page.nextCursor)) as number;
+          }
+          expect(found.size).toBe(expected);
+          expect([left.content, right.content]).toEqual(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+  it('excludes reserved artifact targets without hiding ordinary missing-memory evidence', () => {
+    fc.assert(
+      fc.property(fc.boolean(), fc.constantFrom('missing', 'inactive', 'conflicted'), (shared, status) => {
+        const prefix = `threadnote://user/tester/memories/${shared ? 'shared/default/' : ''}`;
+        const artifact = `${prefix}agent-artifacts/skills/review/SKILL.md`;
+        const ordinary = `${prefix}durable/projects/threadnote/agent-artifacts/missing.md`;
+        const source = record(`${prefix}durable/projects/threadnote/source.md`, 'Artifact references.', {
+          relations: [
+            {type: 'depends_on', uri: artifact},
+            {type: 'depends_on', uri: ordinary},
+          ],
+        });
+        const report = buildContextHealthReport({
+          now,
+          project: 'threadnote',
+          records: [source],
+          relationEvidence: [artifact, ordinary].map(targetUri => ({sourceUri: source.uri, targetUri, status})),
+        });
+        const findings = report.findings.filter(item => item.category.startsWith('relation-target-'));
+        expect(findings).toHaveLength(1);
+        expect(findings[0]?.repair.targetUri).toBe(ordinary);
+        expect(
+          (report.maintenance?.actionableFindings ?? 0) + (report.maintenance?.automaticallyManagedFindings ?? 0),
+        ).toBe(1);
+      }),
+      {numRuns: 24, seed: 74653},
+    );
+  });
+
   it('reports the 2,001-citation admission tail as coverage rather than content damage', () => {
     const records = Array.from({length: 2_001}, (_, index) =>
       record(`threadnote://memory/tn_${index}`, `unique claim ${index}`, {kind: 'handoff'}),
@@ -551,6 +656,71 @@ describe('buildContextHealthReport', () => {
     });
   });
 
+  it('distinguishes uncertain applicability from extraction coverage and finding confidence', () => {
+    for (const knownEnvironment of [false, true]) {
+      for (const knownValidity of [false, true]) {
+        const metadata = knownValidity ? {validFrom: '2026-01-01', validTo: '2027-01-01'} : {};
+        const environment = knownEnvironment ? 'production ' : '';
+        const report = buildContextHealthReport({
+          now,
+          project: 'threadnote',
+          records: [
+            record('threadnote://memory/tn_left', `The ${environment}request timeout is 30 seconds.`, metadata),
+            record('threadnote://memory/tn_right', `The ${environment}request timeout is 60 seconds.`, metadata),
+          ],
+        });
+        const finding = report.findings.find(item => item.category === 'semantic-contradiction');
+        expect(report.semanticCompleteness).toMatchObject({state: 'complete', supportedClaims: 2});
+        expect(finding).toMatchObject({
+          confidence: knownEnvironment && knownValidity ? 'medium' : 'low',
+          repairability: 'manual-review',
+          semanticEvidence: {
+            classification: knownEnvironment && knownValidity ? 'incompatibility' : 'uncertain-comparison',
+          },
+        });
+      }
+    }
+  });
+
+  it('keeps extraction coverage truthful when exact reviewed comparisons leave the queue', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 2, max: 5}), count => {
+        const records = Array.from({length: count}, (_, index) =>
+          record(`threadnote://memory/tn_${index}`, `The production request timeout is ${index + 1} seconds.`, {
+            validFrom: '2026-01-01',
+            validTo: '2027-01-01',
+          }),
+        );
+        const before = structuredClone(records);
+        const input = {now, project: 'threadnote', records};
+        const report = buildContextHealthReport(input);
+        const selected = report.findings.find(item => item.category === 'semantic-contradiction')!;
+        const contradictionId = selected.semanticEvidence!.contradictionId;
+        const reviewed = buildContextHealthReport({
+          ...input,
+          reviewedSemanticContradictionIds: [contradictionId, contradictionId, 'unrelated-id'],
+        });
+        expect(reviewed.findings).toEqual(report.findings.filter(item => item.id !== selected.id));
+        expect(reviewed.semanticCompleteness).toEqual(report.semanticCompleteness);
+        const changedUri = selected.semanticEvidence!.left.recordUri;
+        const changed = records.map(item =>
+          item.uri === changedUri ? record(item.uri, `${item.body}\nAdditional source context.`, item.metadata) : item,
+        );
+        const fresh = buildContextHealthReport({now, project: 'threadnote', records: changed});
+        expect(
+          buildContextHealthReport({
+            now,
+            project: 'threadnote',
+            records: changed,
+            reviewedSemanticContradictionIds: [contradictionId],
+          }).findings,
+        ).toEqual(fresh.findings);
+        expect(records).toEqual(before);
+      }),
+      {numRuns: 24, seed: 753},
+    );
+  });
+
   it('reports semantic limits without manufacturing actionable content findings', () => {
     const records = Array.from({length: 130}, (_, index) =>
       record(`threadnote://memory/tn_${index}`, `Unique module claim ${index}.`),
@@ -558,9 +728,9 @@ describe('buildContextHealthReport', () => {
     const report = buildContextHealthReport({now, project: 'threadnote', records});
     expect(report.maintenance?.actionableFindings).toBe(0);
     expect(report.maintenance?.semanticCoverage).toMatchObject({
-      state: 'partial',
+      state: 'unavailable',
       eligibleRecords: 130,
-      unknownRecords: 2,
+      unknownRecords: 130,
     });
     expect(report.status).toBe('unknown');
   });

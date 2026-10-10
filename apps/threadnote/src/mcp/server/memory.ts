@@ -31,6 +31,7 @@ import {currentPackageVersion, safeTimestamp, sha256} from '../../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {syncSharedReposBeforeAgentRead} from '../../effect/share.js';
 import {withSharedRepositoryLock} from '../../effect/share/lock.js';
@@ -407,20 +408,27 @@ export const readMemoryRecordsByUri = Effect.fn('mcpServer.readMemoryRecordsByUr
   config: RuntimeConfig,
   uris: readonly string[],
 ) {
-  const records = yield* Effect.forEach(
-    uris,
-    uri =>
-      Effect.gen(function* () {
-        const localPath = yield* localMemoryPathForUri(config, uri);
-        if (!localPath) return undefined;
-        const content = yield* readTextIfExists(localPath);
-        if (!content) return undefined;
-        return parseMemoryDocument(uri, content);
-      }),
-    {concurrency: 16},
-  );
-  return records.filter((record): record is MemoryRecord => record !== undefined);
+  return (yield* readMemoryRecordsByUriWithSourceHash(config, uris)).map(item => item.record);
 });
+
+export const readMemoryRecordsByUriWithSourceHash = Effect.fn('mcpServer.readMemoryRecordsByUriWithSourceHash')(
+  function* (config: RuntimeConfig, uris: readonly string[]) {
+    const records = yield* Effect.forEach(
+      uris,
+      uri =>
+        Effect.gen(function* () {
+          const localPath = yield* localMemoryPathForUri(config, uri);
+          if (!localPath) return undefined;
+          const content = yield* readTextIfExists(localPath);
+          if (!content) return undefined;
+          const record = parseMemoryDocument(uri, content);
+          return record === undefined ? undefined : {record, sourceHash: sha256HexSync(content)};
+        }),
+      {concurrency: 16},
+    );
+    return records.filter((item): item is {record: MemoryRecord; sourceHash: string} => item !== undefined);
+  },
+);
 
 const localMemoryDirectoryForCompact = Effect.fn('mcpServer.localMemoryDirectoryForCompact')(function* (
   config: RuntimeConfig,
@@ -491,6 +499,8 @@ export interface WriteDurableMemoryParams {
     readonly uri: string;
   }[];
   readonly metadata: MemoryMetadata;
+  /** The canonical store write has begun; callers must treat its outcome as potentially committed. */
+  readonly onCanonicalWriteStarted?: () => void;
   readonly operation?: 'create' | 'replace' | 'upsert';
   readonly prepared?: PreparedPersonalMemoryWrite;
   readonly replaceUri?: string;
@@ -562,6 +572,24 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
       if (params.replaceUri) {
         if (!currentReplaceTarget) {
           return argumentError(`Memory ${params.replaceUri} no longer exists.`);
+        }
+        if (
+          currentReplaceTarget.metadata.obsidianEvidence &&
+          JSON.stringify(currentReplaceTarget.metadata.obsidianEvidence) !==
+            JSON.stringify(params.metadata.obsidianEvidence)
+        ) {
+          return argumentError(
+            'Replacement would discard or change pinned Obsidian evidence. Derive a new memory from the exact synced note revision.',
+          );
+        }
+        if (
+          currentReplaceTarget.metadata.sourceEvidence &&
+          JSON.stringify(currentReplaceTarget.metadata.sourceEvidence) !==
+            JSON.stringify(params.metadata.sourceEvidence)
+        ) {
+          return argumentError(
+            'Replacement would discard or change pinned source evidence. Derive a new memory from the exact synced source revision.',
+          );
         }
         const schemaRewriteError = memorySchemaRewriteError(currentReplaceTarget.content);
         if (schemaRewriteError) return argumentError(schemaRewriteError.message);
@@ -653,9 +681,12 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
             writeMode,
             false,
             verifyAuthoredMemoryRelationTargetIdentities(config, params.expectedSourceContent),
-            {quiet: true},
+            {quiet: true, onWriteStarted: params.onCanonicalWriteStarted},
           )
-        : writeMemoryFile(config, ov, memoryUri, memory, writeMode, false, {quiet: true});
+        : writeMemoryFile(config, ov, memoryUri, memory, writeMode, false, {
+            quiet: true,
+            onWriteStarted: params.onCanonicalWriteStarted,
+          });
       if (params.replaceUri && !isInPlaceUpdate && currentReplaceTarget) {
         yield* recordMemoryRelocation(config, {
           fromContent: currentReplaceTarget.content,
@@ -1460,6 +1491,24 @@ export function writeMemoryContentWithExpectedHash(
       const [current] = yield* readMemoryRecordsByUri(config, [uri]);
       if (!current || current.content !== expectedContent) {
         return argumentError(`Memory ${uri} changed after compact_context planned its update. Re-run the plan.`);
+      }
+      const schemaError = memorySchemaRewriteError(content);
+      const postcondition = parseMemoryDocument(uri, content);
+      if (
+        schemaError ||
+        !postcondition ||
+        postcondition.metadata.consolidationError ||
+        (postcondition.metadata.citationErrors?.length ?? 0) > 0
+      ) {
+        return argumentError(schemaError?.message ?? `Repair would produce invalid memory evidence for ${uri}.`);
+      }
+      if (
+        current.metadata.consolidation !== undefined &&
+        JSON.stringify(current.metadata.consolidation) !== JSON.stringify(postcondition.metadata.consolidation)
+      ) {
+        return argumentError(
+          'Consolidation derivation requires evidence review before replacement; repair must preserve its pinned receipt.',
+        );
       }
       yield* writeMemoryFile(config, ov, uri, content, 'replace', false, {quiet: true});
       yield* discardDeferredCodeAnchorIntent(config, uri);

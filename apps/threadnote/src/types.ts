@@ -247,7 +247,7 @@ export interface ListOptions {
 export interface HandoffOptions {
   readonly blockers?: string;
   readonly ci?: string;
-  /** Drop keywords preserved from the replaced memory. Handoffs preserve prior keywords by default; explicit authoring and regeneration are not supported for handoffs. */
+  /** Drop keywords preserved from the replaced memory. Mutually exclusive with explicit keywords. */
   readonly clearKeywords?: boolean;
   /** Graph-indexed repository-relative paths or stable code-graph refs captured as immutable code citations. */
   readonly codeRefs?: readonly string[];
@@ -255,6 +255,8 @@ export interface HandoffOptions {
   readonly deferCodeRefs?: boolean;
   readonly dryRun?: boolean;
   readonly issue?: string;
+  /** Explicit search keywords. Handoffs preserve prior keywords by default and never generate keywords. */
+  readonly keywords?: readonly string[];
   readonly nextStep?: string;
   readonly pr?: string;
   readonly project?: string;
@@ -272,6 +274,8 @@ export interface HandoffOptions {
 }
 
 export interface ArchiveOptions {
+  /** Internal recoverable consolidation cleanup identity and stable timestamp. */
+  readonly consolidationCleanup?: {readonly key: string; readonly timestamp: string};
   /** Internal composite-mutation option; the caller must refresh recall indexes from the final state. */
   readonly deferRecallIndexRefresh?: boolean;
   /** Internal accumulator for the archive URI created by a composite mutation. */
@@ -279,6 +283,8 @@ export interface ArchiveOptions {
   readonly dryRun?: boolean;
   /** Internal optimistic-concurrency guard used by hygiene apply. */
   readonly expectedContent?: string;
+  /** Reviewed consolidation source revision, checked under the mutation lock. */
+  readonly expectedRevision?: string;
   readonly kind?: MemoryKind;
   readonly project?: string;
   readonly topic?: string;
@@ -293,6 +299,8 @@ export interface PackOptions {
 
 export interface ForgetOptions {
   readonly dryRun?: boolean;
+  /** Reviewed consolidation source revision, checked under the mutation lock. */
+  readonly expectedRevision?: string;
 }
 
 export interface InitManifestOptions {
@@ -364,6 +372,8 @@ export interface ShareConflictShowOptions {
 export type ShareConflictTake = 'local' | 'shared';
 
 export interface ShareConflictResolveOptions {
+  /** Refuse to resolve if any inspected version changed since review. */
+  readonly expectedRevision?: string;
   readonly dryRun?: boolean;
   readonly fromFile?: string;
   readonly mergedContent?: string;

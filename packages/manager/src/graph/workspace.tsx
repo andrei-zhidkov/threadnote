@@ -1,3 +1,5 @@
+import {RefreshCw} from 'lucide-react';
+import {PageActions} from '../workspace.js';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
 import {compareCodeUnits} from '@threadnote/graph/ordering';
@@ -668,20 +670,14 @@ export function GraphWorkspace(props: {
 
   return (
     <section className="graph-workspace">
-      <header className="workspace-header">
-        <div>
-          <p className="eyebrow">Native code intelligence</p>
-          <h2>Knowledge graph</h2>
-          <p className="workspace-subtitle">
-            Explore architecture from repository-level structure down to individual symbols.
-          </p>
-        </div>
-        <button className="quiet-button" onClick={props.onRefresh} type="button">
+      <PageActions>
+        <button onClick={props.onRefresh} type="button">
+          <RefreshCw />
           Refresh indexes
         </button>
-      </header>
+      </PageActions>
 
-      <div className="graph-page-tabs" aria-label="Knowledge graph sections" role="tablist">
+      <div className="graph-page-tabs workspace-tabs" aria-label="Knowledge graph sections" role="tablist">
         <button
           aria-controls="graph-explore-panel"
           aria-selected={activeTab === 'explore'}
@@ -697,7 +693,7 @@ export function GraphWorkspace(props: {
           tabIndex={activeTab === 'explore' ? 0 : -1}
           type="button"
         >
-          Graph view
+          Explore
         </button>
         <button
           aria-controls="graph-administration-panel"
@@ -714,7 +710,7 @@ export function GraphWorkspace(props: {
           tabIndex={activeTab === 'administration' ? 0 : -1}
           type="button"
         >
-          <span>Status &amp; administration</span>
+          <span>Indexes &amp; administration</span>
           {statusNoticeCount > 0 ? (
             <small aria-label={`${statusNoticeCount} status notices`}>{statusNoticeCount}</small>
           ) : null}
@@ -738,6 +734,9 @@ export function GraphWorkspace(props: {
             onDiagnostics={props.onDiagnostics ?? (() => undefined)}
             output={props.administrationOutput}
             report={props.administration}
+            reconciliation={
+              props.catalog?.reconciliation ?? (props.catalog?.lifecyclePending ? {state: 'unavailable'} : undefined)
+            }
           />
           {props.catalog?.automaticCompaction ? (
             <GraphAutomaticCompactionProgress repositories={repositories} status={props.catalog.automaticCompaction} />
@@ -785,7 +784,7 @@ export function GraphWorkspace(props: {
         role="tabpanel"
         tabIndex={0}
       >
-        <div className="graph-toolbar">
+        <div className="graph-toolbar" hidden={repositories.length === 0}>
           <div className="graph-toolbar-scope">
             <label>
               <span>Repository</span>
@@ -867,103 +866,6 @@ export function GraphWorkspace(props: {
               </select>
             </label>
           </div>
-          <div className="graph-control graph-catalog-continuation">
-            <label htmlFor="graph-catalog-search">Find component or indexed view</label>
-            <div className="graph-control-actions">
-              <input
-                aria-describedby="graph-catalog-search-status"
-                disabled={!repository || catalogLoading}
-                id="graph-catalog-search"
-                maxLength={256}
-                onChange={event => {
-                  setCatalogQuery(event.target.value);
-                  setCatalogSearchResult(undefined);
-                  setCatalogError('');
-                }}
-                onKeyDown={event => {
-                  if (event.key !== 'Enter') return;
-                  event.preventDefault();
-                  loadCatalogContinuation(catalogQuery);
-                }}
-                placeholder="Component, workspace, commit, or view"
-                type="search"
-                value={catalogQuery}
-              />
-              <button
-                disabled={!repository || catalogLoading || catalogQuery.trim().length === 0}
-                onClick={() => loadCatalogContinuation(catalogQuery)}
-                type="button"
-              >
-                {catalogLoading && catalogQuery.trim().length > 0 ? 'Searching…' : 'Find options'}
-              </button>
-            </div>
-            {projectCatalogHasMore || workspaceCatalogHasMore || viewCatalogHasMore ? (
-              <button
-                className="quiet-button"
-                disabled={!repository || catalogLoading}
-                onClick={() => loadCatalogContinuation('')}
-                type="button"
-              >
-                {catalogLoading && catalogQuery.trim().length === 0 ? 'Loading…' : 'Load more options'}
-              </button>
-            ) : null}
-            {catalogError ? <small role="alert">{catalogError}</small> : null}
-            {catalogSearchResult ? (
-              <div
-                className="graph-search-results graph-catalog-results"
-                id="graph-catalog-search-status"
-                role="status"
-              >
-                {catalogSearchResult.options.projects.length + catalogSearchResult.options.views.length > 0 ? (
-                  <>
-                    <p>
-                      Found{' '}
-                      {(
-                        catalogSearchResult.options.projects.length + catalogSearchResult.options.views.length
-                      ).toLocaleString()}{' '}
-                      options for “{catalogSearchResult.query}”
-                    </p>
-                    {catalogSearchResult.options.projects.length > 0 ? (
-                      <div className="graph-catalog-result-group">
-                        <span>Components and workspace matches</span>
-                        {catalogSearchResult.options.projects.map(option => (
-                          <button
-                            key={`${option.viewId}:${option.id}`}
-                            onClick={() => chooseProject(option.id)}
-                            type="button"
-                          >
-                            <strong>{option.label}</strong>
-                            <span>{option.description}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                    {catalogSearchResult.options.views.length > 0 ? (
-                      <div className="graph-catalog-result-group">
-                        <span>Indexed views</span>
-                        {catalogSearchResult.options.views.map(option => (
-                          <button
-                            key={`${option.repositoryId}:${option.id}`}
-                            onClick={() => chooseCatalogView(option.repositoryId, option.id)}
-                            type="button"
-                          >
-                            <strong>{option.label}</strong>
-                            <span>{option.description}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <p>No catalog matches for “{catalogSearchResult.query}”</p>
-                )}
-              </div>
-            ) : (
-              <span className="sr-only" id="graph-catalog-search-status">
-                Search results appear here.
-              </span>
-            )}
-          </div>
           <div className="graph-control graph-search graph-node-search">
             <label htmlFor="graph-current-view-search">Find in current view</label>
             <input
@@ -995,38 +897,6 @@ export function GraphWorkspace(props: {
                 )}
               </div>
             ) : null}
-          </div>
-          <div className="graph-control graph-search graph-code-query">
-            <label htmlFor="graph-code-query">Query the code graph</label>
-            <div className="graph-control-actions">
-              <input
-                disabled={!repository}
-                id="graph-code-query"
-                maxLength={GRAPH_QUERY_MAXIMUM_LENGTH}
-                onChange={event => setQueryInput(event.target.value)}
-                onKeyDown={event => {
-                  if (event.key !== 'Enter') return;
-                  event.preventDefault();
-                  submitCodeQuery();
-                }}
-                placeholder="Concept, path, module, or symbol"
-                type="search"
-                value={queryInput}
-              />
-              <button
-                disabled={!repository || managerGraphQueryCandidate(queryInput) === undefined || queryLoading}
-                onClick={submitCodeQuery}
-                type="button"
-              >
-                {queryLoading ? 'Searching…' : 'Query graph'}
-              </button>
-            </div>
-            {activeQuery ? (
-              <button className="quiet-button" onClick={clearCodeQuery} type="button">
-                Back to {projectId === 'all' ? 'overview' : 'component'}
-              </button>
-            ) : null}
-            {!activeQuery && queryError ? <small role="alert">{queryError}</small> : null}
           </div>
           <div className="graph-stats" aria-label="Graph rendering status">
             <span>{graph ? compactNumber(graph.stats.renderedNodes) : '—'} nodes</span>
@@ -1060,83 +930,216 @@ export function GraphWorkspace(props: {
                       : 'Expand view'}
               </button>
             ) : null}
-            <span className="gpu-badge">WebGL</span>
           </div>
         </div>
-
-        {graph ? (
-          <div className="graph-filterbar">
-            <label>
-              <span>Relationship</span>
-              <select
-                aria-label="Filter relationships"
-                onChange={event => setRelationFilter(event.target.value)}
-                value={relationFilter}
-              >
-                <option value="all">All relationships</option>
-                {relations.map(relation => (
-                  <option key={relation} value={relation}>
-                    {relationLabel(relation)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {graph.mode === 'detail' ? (
-              <label>
-                <span>Node size</span>
-                <select
-                  aria-label="Node size metric"
-                  onChange={event => {
-                    const metric = event.target.value;
-                    if (isGraphSizeMetric(metric)) setSizeMetric(metric);
-                  }}
-                  value={sizeMetric}
-                >
-                  <option value="connections">Connections</option>
-                  <option value="incoming">Incoming</option>
-                  <option value="outgoing">Outgoing</option>
-                </select>
-              </label>
-            ) : (
-              <div className="graph-size-readout">
-                <span>Node size</span>
-                <strong>{graphOverviewSizeLabel(graph)}</strong>
-              </div>
-            )}
-            <div className="graph-focus-control">
-              <span>Selection focus</span>
-              <div className="segmented-control" aria-label="Selection focus">
-                {(
-                  [
-                    ['all', 'All'],
-                    ['neighbors', 'Neighbors'],
-                    ['incoming', 'Incoming'],
-                    ['outgoing', 'Outgoing'],
-                  ] as const
-                ).map(([mode, label]) => (
+        <div className="graph-advanced-slot" hidden={repositories.length === 0}>
+          <details className="graph-advanced">
+            <summary>Search and relationship filters</summary>
+            <div className="graph-advanced-content">
+              <div className="graph-control graph-catalog-continuation">
+                <label htmlFor="graph-catalog-search">Find component or indexed view</label>
+                <div className="graph-control-actions">
+                  <input
+                    aria-describedby="graph-catalog-search-status"
+                    disabled={!repository || catalogLoading}
+                    id="graph-catalog-search"
+                    maxLength={256}
+                    onChange={event => {
+                      setCatalogQuery(event.target.value);
+                      setCatalogSearchResult(undefined);
+                      setCatalogError('');
+                    }}
+                    onKeyDown={event => {
+                      if (event.key !== 'Enter') return;
+                      event.preventDefault();
+                      loadCatalogContinuation(catalogQuery);
+                    }}
+                    placeholder="Component, workspace, commit, or view"
+                    type="search"
+                    value={catalogQuery}
+                  />
                   <button
-                    aria-pressed={focusMode === mode}
-                    disabled={!selectedNode}
-                    key={mode}
-                    onClick={() => setFocusMode(mode)}
+                    disabled={!repository || catalogLoading || catalogQuery.trim().length === 0}
+                    onClick={() => loadCatalogContinuation(catalogQuery)}
                     type="button"
                   >
-                    {label}
+                    {catalogLoading && catalogQuery.trim().length > 0 ? 'Searching…' : 'Find options'}
                   </button>
-                ))}
+                </div>
+                {projectCatalogHasMore || workspaceCatalogHasMore || viewCatalogHasMore ? (
+                  <button
+                    className="quiet-button"
+                    disabled={!repository || catalogLoading}
+                    onClick={() => loadCatalogContinuation('')}
+                    type="button"
+                  >
+                    {catalogLoading && catalogQuery.trim().length === 0 ? 'Loading…' : 'Load more options'}
+                  </button>
+                ) : null}
+                {catalogError ? <small role="alert">{catalogError}</small> : null}
+                {catalogSearchResult ? (
+                  <div
+                    className="graph-search-results graph-catalog-results"
+                    id="graph-catalog-search-status"
+                    role="status"
+                  >
+                    {catalogSearchResult.options.projects.length + catalogSearchResult.options.views.length > 0 ? (
+                      <>
+                        <p>
+                          Found{' '}
+                          {(
+                            catalogSearchResult.options.projects.length + catalogSearchResult.options.views.length
+                          ).toLocaleString()}{' '}
+                          options for “{catalogSearchResult.query}”
+                        </p>
+                        {catalogSearchResult.options.projects.length > 0 ? (
+                          <div className="graph-catalog-result-group">
+                            <span>Components and workspace matches</span>
+                            {catalogSearchResult.options.projects.map(option => (
+                              <button
+                                key={`${option.viewId}:${option.id}`}
+                                onClick={() => chooseProject(option.id)}
+                                type="button"
+                              >
+                                <strong>{option.label}</strong>
+                                <span>{option.description}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        {catalogSearchResult.options.views.length > 0 ? (
+                          <div className="graph-catalog-result-group">
+                            <span>Indexed views</span>
+                            {catalogSearchResult.options.views.map(option => (
+                              <button
+                                key={`${option.repositoryId}:${option.id}`}
+                                onClick={() => chooseCatalogView(option.repositoryId, option.id)}
+                                type="button"
+                              >
+                                <strong>{option.label}</strong>
+                                <span>{option.description}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p>No catalog matches for “{catalogSearchResult.query}”</p>
+                    )}
+                  </div>
+                ) : (
+                  <span className="sr-only" id="graph-catalog-search-status">
+                    Search results appear here.
+                  </span>
+                )}
               </div>
+              <div className="graph-control graph-search graph-code-query">
+                <label htmlFor="graph-code-query">Query the code graph</label>
+                <div className="graph-control-actions">
+                  <input
+                    disabled={!repository}
+                    id="graph-code-query"
+                    maxLength={GRAPH_QUERY_MAXIMUM_LENGTH}
+                    onChange={event => setQueryInput(event.target.value)}
+                    onKeyDown={event => {
+                      if (event.key !== 'Enter') return;
+                      event.preventDefault();
+                      submitCodeQuery();
+                    }}
+                    placeholder="Concept, path, module, or symbol"
+                    type="search"
+                    value={queryInput}
+                  />
+                  <button
+                    disabled={!repository || managerGraphQueryCandidate(queryInput) === undefined || queryLoading}
+                    onClick={submitCodeQuery}
+                    type="button"
+                  >
+                    {queryLoading ? 'Searching…' : 'Query graph'}
+                  </button>
+                </div>
+                {activeQuery ? (
+                  <button className="quiet-button" onClick={clearCodeQuery} type="button">
+                    Back to {projectId === 'all' ? 'overview' : 'component'}
+                  </button>
+                ) : null}
+                {!activeQuery && queryError ? <small role="alert">{queryError}</small> : null}
+              </div>
+              {graph ? (
+                <div className="graph-filterbar">
+                  <label>
+                    <span>Relationship</span>
+                    <select
+                      aria-label="Filter relationships"
+                      onChange={event => setRelationFilter(event.target.value)}
+                      value={relationFilter}
+                    >
+                      <option value="all">All relationships</option>
+                      {relations.map(relation => (
+                        <option key={relation} value={relation}>
+                          {relationLabel(relation)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {graph.mode === 'detail' ? (
+                    <label>
+                      <span>Node size</span>
+                      <select
+                        aria-label="Node size metric"
+                        onChange={event => {
+                          const metric = event.target.value;
+                          if (isGraphSizeMetric(metric)) setSizeMetric(metric);
+                        }}
+                        value={sizeMetric}
+                      >
+                        <option value="connections">Connections</option>
+                        <option value="incoming">Incoming</option>
+                        <option value="outgoing">Outgoing</option>
+                      </select>
+                    </label>
+                  ) : (
+                    <div className="graph-size-readout">
+                      <span>Node size</span>
+                      <strong>{graphOverviewSizeLabel(graph)}</strong>
+                    </div>
+                  )}
+                  <div className="graph-focus-control">
+                    <span>Selection focus</span>
+                    <div className="segmented-control" aria-label="Selection focus">
+                      {(
+                        [
+                          ['all', 'All'],
+                          ['neighbors', 'Neighbors'],
+                          ['incoming', 'Incoming'],
+                          ['outgoing', 'Outgoing'],
+                        ] as const
+                      ).map(([mode, label]) => (
+                        <button
+                          aria-pressed={focusMode === mode}
+                          disabled={!selectedNode}
+                          key={mode}
+                          onClick={() => setFocusMode(mode)}
+                          type="button"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {selectedNode ? (
+                    <button className="graph-clear-selection" onClick={() => selectNode(undefined)} type="button">
+                      Clear selection
+                    </button>
+                  ) : (
+                    <p>Select a node to isolate its neighborhood and direction.</p>
+                  )}
+                </div>
+              ) : null}
             </div>
-            {selectedNode ? (
-              <button className="graph-clear-selection" onClick={() => selectNode(undefined)} type="button">
-                Clear selection
-              </button>
-            ) : (
-              <p>Select a node to isolate its neighborhood and direction.</p>
-            )}
-          </div>
-        ) : null}
-
-        <div className="graph-body">
+          </details>
+        </div>
+        <div className={`graph-body${repository ? '' : ' is-empty'}`}>
           <section className="graph-stage">
             {!props.catalog && props.catalogError ? (
               <div className="graph-empty" role="status">
@@ -1218,7 +1221,7 @@ export function GraphWorkspace(props: {
             )}
           </section>
 
-          <aside className="graph-inspector">
+          <aside className="graph-inspector" hidden={!repository}>
             {selectedNode ? (
               <NodeInspector
                 graph={graph!}

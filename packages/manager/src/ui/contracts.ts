@@ -1,20 +1,45 @@
+import type {ConsolidationProvenance, ConsolidationSource} from '@threadnote/memory/consolidation';
+
+export interface ConsolidationModelOption {
+  readonly id: string;
+  readonly label: string;
+  readonly isDefault: boolean;
+}
+
+export interface ConsolidationModelsResponse {
+  readonly models: readonly ConsolidationModelOption[];
+}
+
+export interface ConsolidationJobResponse {
+  readonly sources?: readonly ConsolidationSource[];
+  readonly agent: string;
+  readonly model?: string;
+  readonly draft?: string;
+  readonly error?: string;
+  readonly id: string;
+  readonly sourceUris: readonly string[];
+  readonly status: 'completed' | 'failed' | 'running';
+}
+
 export type PanelName =
   | 'context'
   | 'context-health'
   | 'doctor'
   | 'graph'
   | 'home'
+  | 'integrations'
   | 'memory'
   | 'processes'
   | 'reviews'
   | 'shares'
-  | 'tools'
   | 'worksets';
 export type SelectId = 'agent' | 'kind' | 'status';
 export type ManagerMemoryKind = 'durable' | 'handoff' | 'incident' | 'preference' | 'smoke';
 export type ManagerMemoryStatus = 'active' | 'archived' | 'expired' | 'superseded';
 
 export interface MemoryMetadata {
+  readonly consolidation?: ConsolidationProvenance;
+  readonly consolidationError?: string;
   readonly archivedFrom?: string;
   readonly kind: ManagerMemoryKind;
   readonly project?: string;
@@ -66,4 +91,31 @@ export interface TargetForm {
   status: ManagerMemoryStatus;
   team: string;
   topic: string;
+}
+
+export interface MemoryResponse {
+  readonly content: string;
+  readonly node: TreeNode;
+  readonly record?: {
+    readonly body: string;
+    readonly content: string;
+    readonly metadata: MemoryMetadata;
+    readonly uri: string;
+  };
+}
+export interface ReadResponse {
+  readonly content: string;
+  readonly localMemory?: MemoryResponse;
+  readonly output: string;
+}
+
+export interface TreeResponse {
+  readonly resourcesTree: TreeNode;
+  readonly tree: TreeNode;
+}
+
+export interface DoctorCheck {
+  readonly detail: string;
+  readonly name: string;
+  readonly status: 'fail' | 'ok' | 'warn';
 }

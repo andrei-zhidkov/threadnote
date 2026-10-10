@@ -90,6 +90,11 @@ const CORE_TOOL_NAMES = [
   'list_context',
   'remember_context',
   'finalize_code_refs',
+  'inspect_obsidian_note',
+  'derive_from_obsidian',
+  'read_source_evidence',
+  'inspect_source_evidence',
+  'derive_from_source',
   'review_session_context',
   'apply_memory_candidates',
   'obsidian_publish',
@@ -464,8 +469,8 @@ describe('Threadnote MCP toolsets', () => {
           expect(tools.tools.map(tool => tool.name)).not.toContain(fullOnlyTool);
         }
         const serializedToolsBytes = Buffer.byteLength(JSON.stringify(tools.tools));
-        // Ratchet the eager-host fallback catalog; search-capable hosts can defer these definitions.
-        expect(serializedToolsBytes).toBeLessThanOrEqual(31_000);
+        // Includes the five revisioned source-evidence tools; search-capable hosts can defer definitions.
+        expect(serializedToolsBytes).toBeLessThanOrEqual(36_000);
         expect(tools.tools.find(tool => tool.name === 'recall_context')?.description).toContain(
           'unread threadnote:// pointers, not evidence',
         );
@@ -719,7 +724,7 @@ describe('Threadnote MCP toolsets', () => {
               type: 'boolean',
             },
             keywords: {
-              description: expect.stringContaining('no handoff/smoke'),
+              description: expect.stringContaining('Explicit search keywords; no smoke'),
             },
             regenerateKeywords: {
               description: expect.stringContaining('no handoff/smoke'),
@@ -784,12 +789,29 @@ describe('Threadnote MCP toolsets', () => {
           text: 'Inactive memories cannot own pending anchors.',
         });
         expect(inactiveDeferred).toContain('citationPolicy=defer requires status=active');
-        const handoffKeywords = await callErrorText(client, 'remember_context', {
-          keywords: ['invalid handoff keyword'],
-          kind: 'handoff',
-          text: 'Handoff keyword schema guidance regression.',
+        const handoffKeywords = await client.callTool({
+          name: 'remember_context',
+          arguments: {
+            keywords: [' review pending ', 'review pending'],
+            kind: 'handoff',
+            project: 'threadnote',
+            text: 'task: No PR has merged to main.\nnext_step: Review the pending PR.',
+            topic: 'explicit-keyword-handoff',
+          },
         });
-        expect(handoffKeywords).toContain('Keyword authoring is not supported for handoff memories');
+        expect(handoffKeywords.isError, JSON.stringify(handoffKeywords)).not.toBe(true);
+        const handoffUri = (handoffKeywords.structuredContent as {readonly memoryUri: string}).memoryUri;
+        const handoffRead = await callText(client, 'read_context', {responseFormat: 'text', uri: handoffUri});
+        const handoffRecord = parseMemoryDocument(handoffUri, handoffRead);
+        expect(handoffRecord?.metadata.keywords).toEqual(['review pending']);
+        expect(handoffRecord?.body).toContain('No PR has merged to main.');
+        const handoffRegeneration = await callErrorText(client, 'remember_context', {
+          kind: 'handoff',
+          regenerateKeywords: true,
+          replaceUri: handoffUri,
+          text: 'task: No PR has merged to main.',
+        });
+        expect(handoffRegeneration).toContain('Keyword regeneration is not supported for handoff memories');
 
         const unanchoredHandoff = await client.callTool(
           {
@@ -2456,7 +2478,7 @@ describe('Threadnote MCP toolsets', () => {
     );
   });
 
-  it('treats an explicit recall project as an eligibility boundary while omitted project stays global', async () => {
+  it('treats explicit project as a boundary and scopes omitted project to the caller workspace', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const workspace = join(fixture.root, 'workspace');
@@ -2518,7 +2540,7 @@ describe('Threadnote MCP toolsets', () => {
         expect(uris?.[0]).toBe(requestedUri);
         expect(uris).not.toContain(workspaceUri);
 
-        const global = await client.callTool(
+        const defaultScoped = await client.callTool(
           {
             arguments: {
               callerCwd: workspace,
@@ -2532,11 +2554,12 @@ describe('Threadnote MCP toolsets', () => {
           undefined,
           {timeout: 10_000},
         );
-        expect(global.isError).not.toBe(true);
-        const globalUris = (
-          global.structuredContent as {readonly results?: readonly {readonly uri?: unknown}[]} | undefined
+        expect(defaultScoped.isError).not.toBe(true);
+        const defaultScopedUris = (
+          defaultScoped.structuredContent as {readonly results?: readonly {readonly uri?: unknown}[]} | undefined
         )?.results?.map(item => item.uri);
-        expect(globalUris).toEqual(expect.arrayContaining([requestedUri, workspaceUri]));
+        expect(defaultScopedUris).toContain(workspaceUri);
+        expect(defaultScopedUris).not.toContain(requestedUri);
       },
       {toolset: 'core'},
     );
@@ -4870,6 +4893,35 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'full'},
     );
+  });
+
+  it('names replaceUri on rejected writes and preserves the canonical memory before a full URI replacement', async () => {
+    await withMcpClient(async (client, fixture) => {
+      const compact = 'memories/handoffs/active/threadnote/uri-validation.md';
+      const uri = `threadnote://user/test-user/${compact}`;
+      const memoryPath = join(fixture.home, 'data', 'local', 'user', 'test-user', compact);
+      const input = {kind: 'handoff', project: 'threadnote', topic: 'uri-validation'};
+      await callText(client, 'remember_context', {...input, text: 'Original synthetic memory.'});
+      const original = await readFile(memoryPath, 'utf8');
+      const files = (await readdir(join(fixture.home, 'data'), {recursive: true})).sort();
+
+      for (const replaceUri of [
+        compact,
+        'https://example.invalid/status.md',
+        'threadnote://user/test-user/../status.md',
+      ]) {
+        await expect(
+          callErrorText(client, 'remember_context', {...input, replaceUri, text: 'Rejected synthetic replacement.'}),
+        ).resolves.toContain('optional "replaceUri" must be a threadnote:// URI');
+        await expect(readFile(memoryPath, 'utf8')).resolves.toBe(original);
+        expect((await readdir(join(fixture.home, 'data'), {recursive: true})).sort()).toEqual(files);
+      }
+
+      await callText(client, 'remember_context', {...input, replaceUri: uri, text: 'Accepted synthetic replacement.'});
+      const replaced = await readFile(memoryPath, 'utf8');
+      expect(replaced).toContain('Accepted synthetic replacement.');
+      expect(replaced).not.toContain('Original synthetic memory.');
+    });
   });
 
   it('requires remember_context replaceUri for same-topic schema rewrites and citation clearing', async () => {

@@ -372,6 +372,7 @@ export interface ShareConflictSummary {
 }
 
 export interface ShareConflictDetail extends ShareConflictSummary {
+  readonly revision: string;
   readonly diff: string;
   readonly localContent?: string;
   readonly previousContent?: string;
@@ -388,7 +389,7 @@ export interface ShareConflictResolveResult {
   readonly uri: string;
 }
 
-type InspectedShareConflict = Omit<ShareConflictDetail, 'diff' | 'resolutionGuidance'>;
+type InspectedShareConflict = Omit<ShareConflictDetail, 'diff' | 'resolutionGuidance' | 'revision'>;
 
 interface ShareUpdateStatus {
   readonly behind: number;
@@ -883,7 +884,9 @@ export function stripPersonalProvenance(
     const stableRelation = options.preserveStableMemoryRelations === true && isStableMemoryRelationHeader(line);
     if (
       !stableRelation &&
-      /^\s*(?:archived_from|candidate_id|evidence|references|relation|source_session_id|supersedes):/.test(line)
+      /^\s*(?:archived_from|candidate_id|consolidation|evidence|references|relation|source_session_id|supersedes):/.test(
+        line,
+      )
     ) {
       continue;
     }
@@ -1002,7 +1005,7 @@ export const writeMemoryFile = Effect.fn('share.writeMemoryFile')(function* (
   content: string,
   initialMode: 'create' | 'replace',
   dryRun: boolean,
-  options: {readonly quiet?: boolean} = {},
+  options: {readonly quiet?: boolean; readonly onWriteStarted?: () => void} = {},
 ) {
   if (dryRun) {
     if (options.quiet !== true) {
@@ -1011,6 +1014,7 @@ export const writeMemoryFile = Effect.fn('share.writeMemoryFile')(function* (
     return;
   }
   const store = yield* ResourceStore;
+  options.onWriteStarted?.();
   yield* store.write(resourceStoreLocation(config), uri, content, {
     mode: initialMode === 'replace' ? 'upsert' : 'create',
   });
@@ -1032,7 +1036,7 @@ export function writeMemoryFileChecked<E, R>(
   initialMode: 'create' | 'replace',
   dryRun: boolean,
   check: Effect.Effect<void, E, R>,
-  options: {readonly quiet?: boolean} = {},
+  options: {readonly quiet?: boolean; readonly onWriteStarted?: () => void} = {},
 ) {
   return Effect.gen(function* () {
     if (dryRun) {
@@ -1042,6 +1046,7 @@ export function writeMemoryFileChecked<E, R>(
       return;
     }
     const store = yield* ResourceStore;
+    options.onWriteStarted?.();
     yield* store.writeChecked(
       resourceStoreLocation(config),
       uri,

@@ -1,5 +1,6 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {ContextHealthCaseDispositionV2} from '@threadnote/context/health_maintenance';
+import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import type {
   ContextMaintenanceCaseV2,
   ContextMaintenanceStatusV2,
@@ -126,14 +127,68 @@ export function publicStatus(
     ...status,
     semanticCoverage: Object.entries(state.semanticProgress ?? {})
       .filter(([name]) => project === undefined || name === project)
-      .map(([name, progress]) => ({
-        project: name,
-        state:
-          progress.cursor >= progress.totalBatches && !progress.partial ? ('complete' as const) : ('partial' as const),
-        eligibleRecords: progress.eligibleRecords,
-        checkedBatches: progress.cursor,
-        totalBatches: progress.totalBatches,
-      })),
+      .map(([name, progress]) => {
+        if (progress.version !== 2 || progress.analyzerVersion !== CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION)
+          return {
+            project: name,
+            state: 'partial' as const,
+            eligibleRecords: progress.eligibleRecords,
+            checkedBatches: 0,
+            totalBatches: progress.totalBatches,
+            extractedRecords: 0,
+            totalRecords: progress.eligibleRecords,
+            extractionComplete: false,
+            comparisonComplete: false,
+            comparedClaimPairs: 0,
+            unsupportedRecords: 0,
+            unsupportedClaims: 0,
+            bodyLimitedRecords: 0,
+            outputOmittedFindings: 0,
+            churnCount: 0,
+            dirtyRecordPairsRemaining: 0,
+          };
+        const records = progress.records?.filter(record => !record.removed) ?? [];
+        const extracted = records.filter(record => record.claims !== undefined);
+        const unsupported = extracted.filter(record => (record.reasons?.length ?? 0) > 0);
+        const allClaims = extracted.reduce((sum, record) => sum + (record.claims ?? 0), 0);
+        const sameRecordPairs = extracted.reduce((sum, record) => sum + (record.claims ?? 0) ** 2, 0);
+        const totalClaimPairs =
+          extracted.length === records.length ? (allClaims ** 2 - sameRecordPairs) / 2 : undefined;
+        const dirtyRecordPairsRemaining =
+          progress.dirty?.reduce((sum, entry) => {
+            const ownIndex = progress.records.findIndex(record => record.uri === entry.uri);
+            return (
+              sum + Math.max(0, progress.records.length - entry.otherCursor - Number(ownIndex >= entry.otherCursor))
+            );
+          }, 0) ?? 0;
+        const comparisonFinished =
+          progress.comparison?.pairCursor >=
+            Math.max(0, (progress.records.length * (progress.records.length - 1)) / 2) &&
+          (progress.dirty?.length ?? 0) === 0;
+        const extractionComplete = extracted.length === records.length;
+        return {
+          project: name,
+          state:
+            comparisonFinished && extractionComplete && unsupported.length === 0 && progress.outputOmittedFindings === 0
+              ? ('complete' as const)
+              : ('partial' as const),
+          eligibleRecords: progress.eligibleRecords,
+          checkedBatches: progress.records.length <= 1 ? Number(extractionComplete) : progress.comparison.pairCursor,
+          totalBatches: progress.totalBatches,
+          extractedRecords: extracted.length,
+          totalRecords: records.length,
+          extractionComplete,
+          comparisonComplete: comparisonFinished,
+          comparedClaimPairs: progress.comparedClaimPairs ?? 0,
+          ...(totalClaimPairs === undefined ? {} : {totalClaimPairs}),
+          unsupportedRecords: unsupported.length,
+          unsupportedClaims: extracted.reduce((sum, record) => sum + (record.unsupportedClaims ?? 0), 0),
+          bodyLimitedRecords: extracted.filter(record => record.reasons?.includes('body-limit')).length,
+          outputOmittedFindings: progress.outputOmittedFindings ?? 0,
+          churnCount: progress.churnCount ?? 0,
+          dirtyRecordPairsRemaining,
+        };
+      }),
     cases,
     receipts: receiptPage.items,
     omittedReceipts: state.receipts.length - receiptPage.items.length,
@@ -160,5 +215,13 @@ export function renderContextMaintenanceStatus(status: ContextMaintenanceStatusV
       .slice(0, 12)
       .map(group => `${group.project}: ${group.reason} (${group.affectedMemories} memories)`),
     ...(status.error === undefined ? [] : [`Maintenance error: ${status.error.reason}`]),
+    ...(status.error?.diagnostic === undefined
+      ? []
+      : [
+          status.error.diagnostic.summary,
+          `Stage: ${status.error.diagnostic.stage}`,
+          ...(status.error.diagnostic.memoryUri === undefined ? [] : [`Memory: ${status.error.diagnostic.memoryUri}`]),
+          status.error.diagnostic.recovery,
+        ]),
   ].join('\n');
 }

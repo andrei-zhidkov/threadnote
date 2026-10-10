@@ -3,12 +3,14 @@ import {managerHomeLanes, type ManagerHomeLane} from '@threadnote/manager/home';
 import {listCandidateReviews} from '@threadnote/memory/candidate';
 import {readMaintenanceMemoryRecords} from '../memory/maintenance/records.js';
 import {collectContextHealth} from '../memory/context/health_commands.js';
+import {readContextMaintenanceStatus} from '../memory/context/maintenance.js';
 import {buildLocalValueReport} from '../value_report/commands.js';
 import {managerAttentionProjectRoot} from './attention.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 export interface ManagerHomeHandoffV1 {
   readonly timestamp: string;
+  readonly project?: string;
   readonly topic?: string;
   readonly uri: string;
 }
@@ -21,6 +23,7 @@ export interface ManagerHomeResponseV1 {
     readonly scanned?: number;
     readonly pending?: number;
     readonly outcomes?: number;
+    readonly decisionMemories?: number;
   };
   readonly lanes: readonly ManagerHomeLane[];
   readonly project: string;
@@ -44,6 +47,7 @@ const homeSources = {
   value: buildLocalValueReport,
   root: managerAttentionProjectRoot,
   health: collectContextHealth,
+  maintenance: readContextMaintenanceStatus,
 };
 
 export type ManagerHomeSources<R = never> = {
@@ -64,11 +68,11 @@ export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(f
 export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse')(function* <R>(
   request: ManagerHomeApiRequest,
   sources: ManagerHomeSources<R>,
-) {
+): Effect.fn.Return<ManagerHomeApiResponse | undefined, never, R> {
   if (request.url.pathname !== '/api/home') return undefined;
   if (request.method !== 'GET') return undefined;
   const project = request.url.searchParams.get('project')?.trim() ?? '';
-  if (!isProject(project)) {
+  if (project && !isProject(project)) {
     return {
       body: {code: 'invalid-project', error: 'Select a project with letters, numbers, dots, underscores, or hyphens.'},
       status: 400,
@@ -76,6 +80,7 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
   }
 
   const deadline = (yield* Clock.currentTimeMillis) + HOME_FOREGROUND_BUDGET_MILLISECONDS;
+  if (!project) return yield* collectAllProjectsHome(request, sources, deadline);
   const observe = <A, E, R>(operation: Effect.Effect<A, E, R>) => observeHomeSource(operation, deadline);
   const corpusFiber = yield* observe(sources.records(request.config)).pipe(Effect.forkChild);
   const rootFiber = yield* observe(sources.root(request.config, project)).pipe(Effect.forkChild);
@@ -89,14 +94,15 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
       }),
     );
   });
-  const [corpusResult, reviewsResult, valueResult, healthResult] = yield* Effect.all(
+  const [corpusResult, reviewsResult, valueResult, healthResult, maintenanceResult] = yield* Effect.all(
     [
       Fiber.join(corpusFiber),
       observe(sources.reviews(request.config.agentContextHome)),
       observe(sources.value(request.config, {period: 30, project})),
       healthObservation,
+      observe(sources.maintenance(request.config, project)),
     ],
-    {concurrency: 4},
+    {concurrency: 5},
   );
   const recordsResult = Result.map(corpusResult, records => activeProjectRecords(records, project));
   const handoffs = Result.isSuccess(recordsResult)
@@ -122,14 +128,21 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
             candidate.state === 'pending' || candidate.state === 'deferred' || candidate.state === 'applying',
         ).length
     : undefined;
+  const healthReport = healthResult && Result.isSuccess(healthResult) ? healthResult.success : undefined;
+  const retainedDecisions = Result.isSuccess(maintenanceResult)
+    ? maintenanceResult.success.counts?.decisionMemories
+    : undefined;
+  const reportDecisions = healthReport?.maintenance?.affectedMemories;
+  const decisionMemories =
+    retainedDecisions === undefined ? reportDecisions : Math.max(retainedDecisions, reportDecisions ?? 0);
   const health =
-    healthResult && Result.isSuccess(healthResult)
+    healthReport || decisionMemories !== undefined
       ? {
-          findingCount: healthResult.success.findings.length + healthResult.success.omittedFindings,
-          decisionMemories: healthResult.success.maintenance?.affectedMemories,
-          automaticCount: healthResult.success.maintenance?.automaticallyManagedFindings,
-          coverage: healthResult.success.maintenance?.citationCoverage.state,
-          status: healthResult.success.status,
+          findingCount: healthReport ? healthReport.findings.length + healthReport.omittedFindings : 0,
+          decisionMemories,
+          automaticCount: healthReport?.maintenance?.automaticallyManagedFindings,
+          coverage: healthReport?.maintenance?.citationCoverage.state,
+          status: healthReport?.status ?? ('unknown' as const),
         }
       : undefined;
   const value = Result.isSuccess(valueResult) ? valueResult.success : undefined;
@@ -142,10 +155,10 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
           ? {
               coverage: healthResult.success.semanticCompleteness.state,
               scanned: healthResult.success.recordsScanned,
-              decisionMemories: healthResult.success.maintenance?.affectedMemories,
               healthCoverage: healthResult.success.maintenance?.citationCoverage.state,
             }
           : {}),
+        ...(decisionMemories === undefined ? {} : {decisionMemories}),
         ...(pendingCount === undefined ? {} : {pending: pendingCount}),
         ...(value
           ? {
@@ -167,6 +180,56 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
             }),
       }),
       project,
+      version: 1,
+    },
+    status: 200,
+  } satisfies ManagerHomeApiResponse;
+});
+
+const collectAllProjectsHome = Effect.fn('managerHome.collectAllProjects')(function* <R>(
+  request: ManagerHomeApiRequest,
+  sources: ManagerHomeSources<R>,
+  deadline: number,
+) {
+  const [corpus, reviews] = yield* Effect.all(
+    [
+      observeHomeSource(sources.records(request.config), deadline),
+      observeHomeSource(sources.reviews(request.config.agentContextHome), deadline),
+    ],
+    {concurrency: 2},
+  );
+  const records = Result.isSuccess(corpus)
+    ? corpus.success.filter(record => record.metadata.status === 'active')
+    : undefined;
+  const pendingCount = Result.isSuccess(reviews)
+    ? reviews.success
+        .flatMap(review => review.candidates)
+        .filter(
+          candidate =>
+            candidate.state === 'pending' || candidate.state === 'deferred' || candidate.state === 'applying',
+        ).length
+    : undefined;
+  return {
+    body: {
+      handoffs: (records ?? [])
+        .filter(record => record.metadata.kind === 'handoff')
+        .sort(
+          (left, right) =>
+            right.metadata.timestamp.localeCompare(left.metadata.timestamp) || left.uri.localeCompare(right.uri),
+        )
+        .slice(0, 5)
+        .map(record => ({
+          timestamp: record.metadata.timestamp,
+          ...(record.metadata.project ? {project: record.metadata.project} : {}),
+          ...(record.metadata.topic ? {topic: record.metadata.topic} : {}),
+          uri: record.uri,
+        })),
+      stats: {
+        ...(records === undefined ? {} : {memories: records.length}),
+        ...(pendingCount === undefined ? {} : {pending: pendingCount}),
+      },
+      lanes: managerHomeLanes(pendingCount === undefined ? {} : {reviews: {pendingCount}}),
+      project: '',
       version: 1,
     },
     status: 200,

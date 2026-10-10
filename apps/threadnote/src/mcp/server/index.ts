@@ -26,7 +26,7 @@ import {
 } from '@threadnote/graph/sharing/contribution/retry';
 import {runCodeGraphAutomaticCompactionScheduler} from '@threadnote/graph/automatic/compaction';
 import {refreshPendingDeferredCodeAnchorWorkspaces} from '../../memory/deferred/code_anchor_refresh.js';
-import {runObsidianProjectionPublish} from '../../obsidian/projection.js';
+import {runObsidianProjectionPublish} from '@threadnote/integration-obsidian/projection';
 import {withProductionLogging} from '../../effect/production_log.js';
 import {withAnonymousTelemetry} from '../../effect/telemetry.js';
 import {
@@ -62,6 +62,8 @@ import {
 } from './recall.js';
 import {registerListTool} from './list.js';
 import {registerFinalizeCodeRefsTool, registerStoreTool} from './store.js';
+import {registerSourceEvidenceTools} from './source_evidence.js';
+import {registerObsidianEvidenceTools} from './obsidian_evidence.js';
 import {
   registerCompactTool,
   runNativeAddResourceTool,
@@ -331,6 +333,10 @@ function registerTools(
   if (capabilities.memoryWrite) {
     registerStoreTool(server, config, 'remember_context', 'Store memory.', memoryScope);
     registerFinalizeCodeRefsTool(server, config);
+  }
+  if (toolset === 'core' || toolset === 'full') {
+    registerObsidianEvidenceTools(server, config);
+    registerSourceEvidenceTools(server, config);
   }
   if (toolset === 'full') {
     registerStoreTool(server, config, 'store', 'Compatibility alias for remember_context.');

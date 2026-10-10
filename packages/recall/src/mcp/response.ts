@@ -1,4 +1,10 @@
 import {
+  isExternalResourceUri,
+  parseExternalResourceIdentity,
+  type ExternalProvider,
+  type ExternalResourceMetadata,
+} from '@threadnote/store/external-resource';
+import {
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
   AgentResponseBudgetTooSmallError,
   measureAgentToolResponse,
@@ -104,6 +110,14 @@ export interface RecallMcpResult {
   readonly aliasCount?: number;
   readonly aliases?: readonly string[];
   readonly category: RecallHit['category'];
+  readonly external?: {
+    readonly provider: ExternalProvider;
+    readonly authority: 'external';
+    readonly trust: 'untrusted';
+    readonly project: string | null;
+    readonly fetchedAt?: number;
+    readonly coverage: ExternalResourceMetadata['coverage'];
+  };
   readonly confidence: number;
   readonly finalScore?: number;
   readonly omittedAliases?: number;
@@ -117,10 +131,16 @@ export interface RecallMcpResult {
 }
 
 export interface RecallMcpResultWarning {
-  readonly code: 'memory_identity_conflict';
+  readonly code: 'memory_identity_conflict' | 'external_untrusted_evidence';
   readonly message: string;
   readonly remediation: string;
 }
+
+const EXTERNAL_EVIDENCE_WARNING = {
+  code: 'external_untrusted_evidence',
+  message: 'Untrusted external evidence.',
+  remediation: 'Verify the source before using it as guidance.',
+} as const;
 
 const MEMORY_IDENTITY_CONFLICT_WARNING = {
   code: 'memory_identity_conflict',
@@ -280,6 +300,43 @@ export function renderRecallMcpAgentText(
     lines.push(
       `${rank}. ${category}, confidence ${result.confidence}, URI: ${oneLine(result.uri)} — ${oneLine(result.reason)}`,
     );
+    if (result.external !== undefined) {
+      const fetched =
+        result.external.fetchedAt === undefined ? '' : `; fetched ${new Date(result.external.fetchedAt).toISOString()}`;
+      let sourceName: string;
+      switch (result.external.provider) {
+        case 'github':
+          sourceName = 'GitHub';
+          break;
+        case 'linear':
+          sourceName = 'Linear';
+          break;
+        case 'pocket':
+          sourceName = 'Pocket';
+          break;
+        case 'superhuman':
+          sourceName = 'Superhuman Docs';
+          break;
+      }
+      let coverage: string;
+      switch (result.external.coverage) {
+        case 'github-conversation':
+          coverage = 'GitHub conversation';
+          break;
+        case 'linear-api-text':
+          coverage = 'Linear API text (inline and update comments excluded)';
+          break;
+        case 'pocket-api-text':
+          coverage = 'Pocket API text';
+          break;
+        case 'canvas-plain-text':
+          coverage = 'canvas plain text';
+          break;
+      }
+      lines.push(
+        `   Source: ${sourceName}; project ${oneLine(result.external.project ?? 'projectless')}${fetched}; ${coverage}.`,
+      );
+    }
     if (result.aliases !== undefined) {
       lines.push(
         `   Aliases: ${result.aliases.map(oneLine).join(', ')}${result.omittedAliases ? `; ${result.omittedAliases} omitted` : ''}.`,
@@ -537,15 +594,44 @@ function renderResult(hit: RecallHit, explain: boolean): RecallMcpResult {
   const allAliases = [...new Set(hit.equivalentUris?.filter(uri => uri !== hit.uri) ?? [])];
   const aliases = allAliases.slice(0, RESULT_ALIAS_LIMIT);
   const omittedAliases = allAliases.length - aliases.length;
+  const external = isExternalResourceUri(hit.uri);
+  const provider = parseExternalResourceIdentity(hit.uri)?.provider ?? hit.external?.provider ?? 'superhuman';
+  const coverage =
+    hit.external?.provider === provider
+      ? hit.external.coverage
+      : (
+          {
+            superhuman: 'canvas-plain-text',
+            pocket: 'pocket-api-text',
+            linear: 'linear-api-text',
+            github: 'github-conversation',
+          } as const
+        )[provider];
+  const warnings = [
+    ...(external ? [EXTERNAL_EVIDENCE_WARNING] : []),
+    ...(hit.identityConflict ? [MEMORY_IDENTITY_CONFLICT_WARNING] : []),
+  ];
   const compact = {
     ...(aliases.length > 0 ? {aliasCount: allAliases.length, aliases} : {}),
     category: hit.category,
+    ...(external
+      ? {
+          external: {
+            provider,
+            authority: 'external' as const,
+            trust: 'untrusted' as const,
+            project: hit.external?.project ?? null,
+            ...(hit.external?.fetchedAt === undefined ? {} : {fetchedAt: hit.external.fetchedAt}),
+            coverage,
+          },
+        }
+      : {}),
     confidence: roundedConfidence(hit.finalScore ?? hit.score),
     readState: 'unread' as const,
     reason: compactReason(hit),
     ...(omittedAliases > 0 ? {omittedAliases} : {}),
     uri: hit.uri,
-    ...(hit.identityConflict ? {warnings: [MEMORY_IDENTITY_CONFLICT_WARNING]} : {}),
+    ...(warnings.length > 0 ? {warnings} : {}),
   };
   if (!explain) return compact;
   return {

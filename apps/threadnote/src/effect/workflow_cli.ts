@@ -90,7 +90,7 @@ export function makeContextBriefCommand<E, R>(
               ),
             ),
           ),
-          `Maximum estimated tokens for the combined structured and text response (${CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS}-${CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS})`,
+          `Maximum estimated tokens for the agent text (${CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS}-${CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS}); --json exposes the same selected evidence with structured audit metadata`,
         ),
       ),
       codeRefs: repeatedString(
@@ -418,7 +418,7 @@ export function makeContextMaintainCommand<E, R>(
       ),
       project: optionalString('project', 'Optional project selection; omitted work is processed fairly'),
       receiptId: optionalString('receipt-id', 'Exact local automatic repair receipt for undo'),
-      caseId: optionalString('case-id', 'Exact local maintenance case for a bounded agent packet or status selector'),
+      caseId: optionalString('case-id', 'Exact citation case refresh, bounded agent packet, or status selector'),
       caseCursor: optionalString('case-cursor', 'Generation-bound next retained case page'),
       receiptCursor: optionalString('receipt-cursor', 'Generation-bound next retained receipt page'),
       citationId: optionalString('citation-id', 'Exact scoped citation evidence selector'),

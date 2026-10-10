@@ -1,11 +1,51 @@
 import type {
+  ContextHealthSemanticContradictionV2,
+  ContextHealthSemanticProgressCoverage,
+} from '@threadnote/context/health_semantic';
+import type {
   CandidateCategory,
   CandidateComparison,
   CandidateRecommendation,
   CandidateReviewState,
 } from '@threadnote/memory/candidate';
 import type {ContextHealthReportV1} from '@threadnote/context/health';
+import type {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
 import type {MemoryKind} from '@threadnote/memory/types';
+
+export interface ManagerSemanticReviewInputV1 {
+  readonly project: string;
+  readonly contradictionId: string;
+  readonly left: {
+    readonly recordUri: string;
+    readonly recordContentFingerprint: string;
+    readonly claimFingerprint?: string;
+  };
+  readonly right: {
+    readonly recordUri: string;
+    readonly recordContentFingerprint: string;
+    readonly claimFingerprint?: string;
+  };
+  readonly choice: 'left' | 'right' | 'both';
+}
+export interface ManagerSemanticReviewPreviewV1 {
+  readonly previewId: string;
+  readonly revision: string;
+  readonly choice: 'left' | 'right' | 'both';
+  readonly mode: 'archive-other' | 'keep-both' | 'review-only';
+  readonly summary: string;
+  readonly reason?: string;
+  readonly keptUri?: string;
+  readonly archivedUri?: string;
+  readonly keptContent?: string;
+  readonly archivedContent?: string;
+  readonly constraints: readonly string[];
+}
+export interface ManagerSemanticReviewApplyResultV1 {
+  readonly status: 'applied' | 'already-applied';
+  readonly choice: 'left' | 'right' | 'both';
+  readonly keptUri?: string;
+  readonly archivedUri?: string;
+}
 
 export type ManagerRepositoryEvidenceUnavailableReasonV1 =
   'foreign-host' | 'manifest-unavailable' | 'project-not-configured' | 'repository-unavailable';
@@ -114,6 +154,7 @@ export interface ManagerContextMaintenanceCaseV2 {
   readonly memoryId: string;
   readonly subjectUri?: string;
   readonly archivedUri?: string;
+  readonly subjectContentHashes?: readonly {readonly uri: string; readonly hash: string}[];
   readonly family: string;
   readonly slot: string;
   readonly evidenceRevision: string;
@@ -152,6 +193,7 @@ export interface ManagerContextMaintenanceStatusV2 {
   readonly paused: boolean;
   readonly state: 'idle' | 'running' | 'waiting-evidence' | 'needs-decision' | 'failed';
   readonly generation: string;
+  readonly semanticCoverage?: readonly ContextHealthSemanticProgressCoverage[];
   readonly preparation?: {
     readonly complete: boolean;
     readonly admittedRecords: number;
@@ -182,7 +224,11 @@ export interface ManagerContextMaintenanceStatusV2 {
   readonly omittedReceipts?: number;
   readonly page?: {readonly generation: string; readonly caseNextCursor?: string; readonly receiptNextCursor?: string};
   readonly lastProgressAt?: string;
-  readonly error?: {readonly reason: string; readonly at: string};
+  readonly error?: {
+    readonly reason: string;
+    readonly at: string;
+    readonly diagnostic?: ContextMaintenanceSnapshotDiagnosticV1;
+  };
 }
 
 export interface ManagerContextMaintenancePacketV2 {
@@ -199,6 +245,7 @@ export interface ManagerContextMaintenancePacketV2 {
   readonly choices: readonly string[];
   readonly allowedOperations: readonly string[];
   readonly instructions: string;
+  readonly semanticEvidence?: ContextHealthSemanticContradictionV2;
   readonly evidence?: ManagerContextHealthCodePreviewV1['evidence'];
   readonly evidenceSelectors?: readonly {
     readonly caseId: string;

@@ -1,20 +1,22 @@
+import {ShieldCheck} from 'lucide-react';
+import {WorkspaceUtilities} from '../workspace_utilities.js';
 import {Schema} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
-import type {
-  ManagerContextHealthResponseV1,
-  ManagerContextMaintenanceStatusV2,
-  ManagerContextMaintenancePacketV2,
-} from './contracts.js';
+import type {ManagerContextHealthResponseV1, ManagerContextMaintenanceStatusV2} from './contracts.js';
 import {
   groupMaintenanceCauses,
   healthDecisionGroups,
   healthDecisionTask,
+  maintenanceDecisionExplanation,
+  maintenanceDecisionLabel,
+  maintenanceMemoryTitle,
   maintenanceRecoveryInstruction,
   maintenanceStatusLabel,
   maintenanceUndoConflictMessage,
   mergeMaintenanceStatusPage,
 } from './maintenance.js';
 import {HealthDetail} from '../attention_details.js';
+import {MaintenanceCaseDialog, MaintenanceTaskDialog} from './maintenance_dialogs.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 
 interface Props {
@@ -32,6 +34,7 @@ interface Props {
 }
 
 export function ContextMaintenanceView(props: Props): React.ReactElement {
+  const [tab, setTab] = useState<'decisions' | 'recovery' | 'history' | 'hygiene'>('decisions');
   const [snapshot, setSnapshot] = useState<{
     project: string;
     status: ManagerContextMaintenanceStatusV2;
@@ -43,8 +46,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const [refresh, setRefresh] = useState(0);
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [task, setTask] = useState('');
-  const [packet, setPacket] = useState<ManagerContextMaintenancePacketV2>();
-  const [retainedCase, setRetainedCase] = useState<ManagerContextMaintenanceStatusV2['cases'][number]>();
+  const [inspectedCase, setInspectedCase] = useState<{caseId: string; memoryUri?: string; title?: string}>();
   const [loadingHistory, setLoadingHistory] = useState(false);
   const activeProject = useRef(props.project);
   const projectEpoch = useRef(0);
@@ -60,10 +62,6 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const lastReportRevision = useRef<string | undefined>(undefined);
   const status = snapshot?.project === props.project ? snapshot.status : undefined;
   useEffect(() => {
-    setPacket(undefined);
-    setRetainedCase(undefined);
-  }, [status?.page?.generation]);
-  useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
@@ -74,8 +72,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     setConflictSubjectUri(undefined);
     setSelected(undefined);
     setTask('');
-    setPacket(undefined);
-    setRetainedCase(undefined);
+    setInspectedCase(undefined);
     setLoadingHistory(false);
   }, [props.project]);
   useEffect(() => {
@@ -136,6 +133,17 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [props.project, refresh]);
+
+  function refreshEvidence() {
+    setNotice('');
+    mutationEpoch.current += 1;
+    setRefresh(value => value + 1);
+    onChanged.current();
+  }
+  function refreshAfterDecision() {
+    refreshEvidence();
+    setNotice('Change saved.');
+  }
 
   async function act(action: 'run-now' | 'pause' | 'resume' | 'undo', receiptId?: string) {
     if (actionBusy.current) return;
@@ -212,32 +220,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     }
   }
 
-  async function inspectCase(caseId: string, selection?: {memoryUri: string; citationId: string}) {
-    const project = props.project;
-    const epoch = projectEpoch.current;
-    setError('');
-    setPacket(undefined);
-    try {
-      const details = await api<ManagerContextMaintenanceStatusV2>(
-        `/api/attention/context-maintenance?project=${encodeURIComponent(project)}&view=status&caseId=${encodeURIComponent(caseId)}`,
-      );
-      if (!mounted.current || activeProject.current !== project || projectEpoch.current !== epoch) return;
-      setRetainedCase(details.cases?.find(item => item.caseId === caseId));
-      const result = await api<ManagerContextMaintenancePacketV2>(
-        `/api/attention/context-maintenance?project=${encodeURIComponent(project)}&caseId=${encodeURIComponent(caseId)}${selection ? `&memoryUri=${encodeURIComponent(selection.memoryUri)}&citationId=${encodeURIComponent(selection.citationId)}` : ''}`,
-      );
-      if (!mounted.current || activeProject.current !== project || projectEpoch.current !== epoch) return;
-      if (result.project !== project || result.caseId !== caseId)
-        throw new Error('The selected maintenance case changed. Refresh status.');
-      setPacket(result);
-    } catch (cause) {
-      if (mounted.current && activeProject.current === project && projectEpoch.current === epoch)
-        setError(errorMessage(cause));
-    }
-  }
-
   const summary = props.report.maintenance;
-  const groups = healthDecisionGroups(props.report);
+  const cases = (status?.cases ?? []).filter(item => item.project === props.project);
+  const groups = healthDecisionGroups(props.report, cases);
+  const moreDecisionCases =
+    status?.page?.caseNextCursor !== undefined &&
+    (status.counts?.['needs-decision'] ?? Infinity) >
+      cases.filter(item => item.disposition === 'needs-decision').length;
   const decisionCount = Math.max(
     summary?.affectedMemories ?? 0,
     status?.counts?.decisionMemories ?? 0,
@@ -250,29 +239,37 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   );
   const citation = summary?.citationCoverage;
   const semantic = summary?.semanticCoverage ?? props.report.semanticCompleteness;
+  const semanticProgress = status?.semanticCoverage?.find(item => item.project === props.project);
+  const semanticState = semanticProgress?.state ?? semantic.state;
+  const semanticScanComplete =
+    semanticProgress === undefined || (semanticProgress.extractionComplete && semanticProgress.comparisonComplete);
   const coverage =
-    citation?.state === 'complete' && semantic.state === 'complete'
+    citation?.state === 'complete' && semanticState === 'complete'
       ? 'complete'
-      : citation?.state === 'unavailable' && semantic.state === 'unavailable'
+      : citation?.state === 'unavailable' && semanticState === 'unavailable'
         ? 'unavailable'
         : 'partial';
   const projectProgress = status?.projects.find(item => item.project === props.project);
   const emptyProject =
     projectProgress === undefined && status?.preparation?.complete === true && props.report.recordsScanned === 0;
   const scanComplete =
-    emptyProject ||
-    (projectProgress !== undefined &&
-      projectProgress.checked === projectProgress.eligible &&
-      status?.preparation?.complete !== false);
-  const scanLabel = status?.paused
-    ? 'Paused'
-    : status?.state === 'failed'
+    semanticScanComplete &&
+    (emptyProject ||
+      (projectProgress !== undefined &&
+        projectProgress.checked === projectProgress.eligible &&
+        status?.preparation?.complete !== false));
+  const scanTone =
+    status?.state === 'failed' ? 'danger' : status?.paused ? 'warning' : scanComplete ? 'success' : 'info';
+  const scanLabel =
+    status?.state === 'failed'
       ? 'Stopped'
-      : !status
-        ? 'Checking…'
-        : scanComplete
-          ? 'Caught up'
-          : 'Scanning';
+      : status?.paused
+        ? 'Paused'
+        : !status
+          ? 'Checking…'
+          : scanComplete
+            ? 'Caught up'
+            : 'Scanning';
   const causes =
     status?.groups === undefined
       ? groupMaintenanceCauses((status?.cases ?? []).filter(item => item.project === props.project))
@@ -290,47 +287,41 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             nextAttemptAt: item.nextAttemptAt,
           }));
   const receipts = (status?.receipts ?? []).filter(item => item.project === props.project);
-  const cases = (status?.cases ?? []).filter(item => item.project === props.project);
   const dispositionCount = (disposition: string) =>
     status?.counts?.[disposition] ?? cases.filter(item => item.disposition === disposition).length;
-  const representedCases = new Set(props.report.findings.map(finding => finding.caseId));
-  const unloadedDecisions = cases.filter(
-    item => item.disposition === 'needs-decision' && !representedCases.has(item.caseId),
-  );
   return (
     <section aria-busy={busy} className="panel attention-panel context-health is-active">
-      <header className="attention-header">
-        <div>
-          <p className="eyebrow">Living context</p>
-          <h2>Context health</h2>
-          <p
-            role="status"
-            aria-live="polite"
-            className="health-overview-status"
-            data-tone={decisionCount > 0 ? 'warning' : coverage === 'complete' ? 'success' : 'info'}
+      <div className="workspace-tabs" role="tablist" aria-label="Context Health sections">
+        {(
+          [
+            ['decisions', 'Needs a decision'],
+            ['recovery', 'Automatic recovery'],
+            ['history', 'History'],
+            ['hygiene', 'Hygiene'],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={tab === value}
+            className={tab === value ? 'is-active' : undefined}
+            onClick={() => setTab(value)}
           >
-            {maintenanceStatusLabel({
-              decisions: decisionCount,
-              coverage,
-              paused: status?.paused ?? false,
-              state: status?.state,
-            })}
-          </p>
-        </div>
-        <label>
-          Project
-          <select
-            aria-label="Context health project"
-            value={props.project}
-            onChange={event => props.onProjectChange(event.target.value)}
-          >
-            {props.projects.map(project => (
-              <option key={project}>{project}</option>
-            ))}
-          </select>
-        </label>
-      </header>
-      <div className="attention-metrics">
+            {label}
+            {value === 'decisions' && decisionCount > 0 ? <span>{decisionCount}</span> : null}
+          </button>
+        ))}
+      </div>
+      <p role="status" aria-live="polite" className="workspace-note">
+        <ShieldCheck />
+        {maintenanceStatusLabel({
+          decisions: decisionCount,
+          coverage,
+          paused: status?.paused ?? false,
+          state: status?.state,
+        })}
+      </p>
+      <div className="attention-metrics" hidden={tab !== 'recovery'}>
         <Metric
           label="Needs your decision"
           value={`${decisionCount.toLocaleString()} ${decisionCount === 1 ? 'memory' : 'memories'}`}
@@ -348,13 +339,21 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           tone="neutral"
         />
       </div>
-      <section className="attention-bulk-repair" aria-label="Maintenance controls">
+      <section hidden={tab !== 'recovery'} className="attention-bulk-repair" aria-label="Maintenance controls">
         <div>
           <div className="health-maintenance-heading">
             <strong>Automatic maintenance</strong>
             <span
               className="health-status-badge"
-              data-tone={status?.paused ? 'neutral' : status?.state === 'failed' ? 'warning' : 'success'}
+              data-tone={
+                status?.state === 'failed'
+                  ? 'danger'
+                  : status?.paused
+                    ? 'warning'
+                    : status?.state === 'running'
+                      ? 'info'
+                      : 'neutral'
+              }
             >
               {status?.paused
                 ? 'Paused'
@@ -410,21 +409,46 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       ) : null}
       {notice ? <p role="status">{notice}</p> : null}
       {status?.error ? (
-        <p role="alert">
-          Maintenance stopped: {status.error.reason}. Progress is preserved; inspect the diagnostic before resuming.
-        </p>
+        <section
+          role="alert"
+          aria-label="Maintenance failure diagnostic"
+          className="attention-card maintenance-failure-diagnostic"
+        >
+          <p>Maintenance stopped: {status.error.reason}. Progress is preserved.</p>
+          {status.error.diagnostic ? (
+            <>
+              <p>{status.error.diagnostic.summary}</p>
+              <p>Stage: {status.error.diagnostic.stage.replaceAll('-', ' ')}</p>
+              {status.error.diagnostic.memoryUri ? (
+                <p>
+                  <code>{status.error.diagnostic.memoryUri}</code>
+                </p>
+              ) : null}
+              <p>{status.error.diagnostic.recovery}</p>
+            </>
+          ) : (
+            <p>
+              Run maintenance again to collect current failure details. Update Threadnote if this version keeps
+              reporting only a reason.
+            </p>
+          )}
+        </section>
       ) : null}
-      <section aria-label="Evidence coverage" className="attention-card health-coverage-card">
+      <section
+        hidden={tab !== 'recovery'}
+        aria-label="Evidence coverage"
+        className="attention-card health-coverage-card"
+      >
         <header>
           <h3>Evidence coverage</h3>
           <span className="health-status-badge" data-tone={coverage === 'complete' ? 'success' : 'info'}>
             {coverage}
           </span>
         </header>
-        <div className="health-scan-progress" aria-label="Background scan">
+        <div className="health-scan-progress" aria-label="Background scan" data-tone={scanTone}>
           <header>
             <strong>Background scan</strong>
-            <span className="health-status-badge" data-tone={scanComplete ? 'success' : 'info'}>
+            <span className="health-status-badge" data-tone={scanTone}>
               {scanLabel}
             </span>
           </header>
@@ -490,11 +514,94 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           Historical evidence preserves an earlier source; it does not verify today’s code. Missing source evidence is
           retried automatically when sources change.
         </p>
-        <p>
-          This report fully analyzes claims in {semantic.analyzedRecords?.toLocaleString() ?? '0'} of{' '}
-          {semantic.eligibleRecords?.toLocaleString() ?? '0'} durable memories. Heuristic coverage can remain partial
-          after scanning finishes. Only supported conflicts need your decision.
-        </p>
+        {semanticProgress ? (
+          <div className="health-scan-progress" aria-label="Semantic scan progress">
+            <header>
+              <strong>Memory comparisons</strong>
+              <span
+                className="health-status-badge"
+                data-tone={semanticProgress.state === 'complete' ? 'success' : 'info'}
+              >
+                {semanticScanComplete
+                  ? semanticProgress.state === 'complete'
+                    ? 'Checked'
+                    : 'Checked with gaps'
+                  : 'In progress'}
+              </span>
+            </header>
+            <p>
+              {semanticProgress.extractedRecords.toLocaleString()} of {semanticProgress.totalRecords.toLocaleString()}{' '}
+              durable memories read
+            </p>
+            <progress
+              aria-label="Claim extraction progress"
+              value={semanticProgress.extractedRecords}
+              max={Math.max(1, semanticProgress.totalRecords)}
+            />
+            {semanticProgress.churnCount > 0 ? (
+              <p>
+                {semanticProgress.comparedClaimPairs.toLocaleString()} comparison checks performed across source
+                revisions.{' '}
+                {semanticProgress.comparisonComplete
+                  ? 'Current comparisons finished.'
+                  : 'Changed claims are being checked again.'}
+              </p>
+            ) : semanticProgress.totalClaimPairs === undefined ? (
+              <p>
+                {semanticProgress.comparedClaimPairs.toLocaleString()} claim comparisons checked. The total grows as
+                remaining memories are read.
+              </p>
+            ) : (
+              <>
+                <p>
+                  {semanticProgress.comparedClaimPairs.toLocaleString()} of{' '}
+                  {semanticProgress.totalClaimPairs.toLocaleString()} claim comparisons checked
+                </p>
+                <progress
+                  aria-label="Claim comparison progress"
+                  value={semanticProgress.comparedClaimPairs}
+                  max={Math.max(1, semanticProgress.totalClaimPairs)}
+                />
+              </>
+            )}
+            {semanticProgress.unsupportedClaims > 0 ? (
+              <p>
+                {semanticProgress.unsupportedClaims.toLocaleString()} claims in{' '}
+                {semanticProgress.unsupportedRecords.toLocaleString()} memories could not be interpreted.
+              </p>
+            ) : null}
+            {semanticProgress.bodyLimitedRecords > 0 ? (
+              <p>
+                {semanticProgress.bodyLimitedRecords.toLocaleString()}{' '}
+                {semanticProgress.bodyLimitedRecords === 1 ? 'memory exceeded' : 'memories exceeded'} the supported text
+                limit.
+              </p>
+            ) : null}
+            {semanticProgress.outputOmittedFindings > 0 ? (
+              <p>
+                {semanticProgress.outputOmittedFindings.toLocaleString()} findings are outside the retained output
+                limit. Coverage remains partial.
+              </p>
+            ) : null}
+            {semanticProgress.churnCount > 0 ? (
+              <p>
+                {semanticProgress.churnCount.toLocaleString()} source changes invalidated affected work; unaffected
+                progress is preserved.
+              </p>
+            ) : null}
+            <p>
+              Completed checks do not prove that memories agree. Unsupported text and comparisons with missing context
+              still need review.
+            </p>
+          </div>
+        ) : (
+          <p>
+            The bounded English extractor assessed supported claims in{' '}
+            {semantic.analyzedRecords?.toLocaleString() ?? '0'} of {semantic.eligibleRecords?.toLocaleString() ?? '0'}{' '}
+            durable memories. Extraction coverage can remain partial after scanning finishes and does not establish
+            semantic correctness. Comparisons with missing context require review.
+          </p>
+        )}
         {props.report.repositoryEvidence.state === 'unavailable' ? (
           <p>
             Current repository evidence is unavailable. Memory and relation checks remain useful; local evidence
@@ -524,25 +631,32 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           ))}
         </details>
       </section>
-      <section aria-label="Needs your decision" className="attention-list health-record-list">
+      <section
+        hidden={tab !== 'decisions'}
+        aria-label="Needs your decision"
+        className="attention-list health-record-list"
+      >
         <h3>Needs your decision</h3>
-        {groups.length === 0 && unloadedDecisions.length === 0 ? (
-          <p>No supported decisions are waiting in the loaded context. Evidence coverage remains visible above.</p>
+        {groups.length === 0 ? (
+          <p>No decisions are waiting in the loaded context. Open Automatic recovery to inspect evidence coverage.</p>
         ) : null}
         {groups.map(group => (
-          <article key={group.uri} className="attention-card health-record health-decision-card">
+          <article key={group.key} className="attention-card health-record health-decision-card">
             <header>
               <div>
-                <h3>{group.preview?.title ?? 'Memory needing a decision'}</h3>
-                <p>{group.preview?.excerpt ?? 'Open the memory to read the claim before deciding.'}</p>
+                <h3>{group.preview?.title ?? maintenanceMemoryTitle(group.uri)}</h3>
+                <p>{group.preview?.excerpt ?? maintenanceDecisionExplanation(group.cases[0]?.reason ?? '')}</p>
               </div>
               <span className="attention-count">
-                {group.findings.length} supporting {group.findings.length === 1 ? 'check' : 'checks'}
+                {group.findings.length + group.cases.length} supporting{' '}
+                {group.findings.length + group.cases.length === 1 ? 'check' : 'checks'}
               </span>
             </header>
-            <button type="button" className="health-quiet-action" onClick={() => props.onOpenLibrary(group.uri)}>
-              Open memory
-            </button>
+            {group.uri ? (
+              <button type="button" className="health-quiet-action" onClick={() => props.onOpenLibrary(group.uri)}>
+                Open memory
+              </button>
+            ) : null}
             {group.preview?.code.map(code => (
               <section className="health-code-preview" key={code.citationId}>
                 <h4>{code.targetLabel ?? code.path}</h4>
@@ -586,18 +700,47 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 </button>
               </section>
             ))}
-            <p>
-              Choose a supported claim, preserve this memory as historical, or archive obsolete advice after reviewing
-              its evidence.
+            {group.cases.length > 0 ? (
+              <section className="health-finding">
+                {[...new Set(group.cases.map(item => item.reason))].map(reason => (
+                  <div key={reason}>
+                    <h4>{maintenanceDecisionLabel(reason)}</h4>
+                    {group.preview || group.cases.length > 1 ? <p>{maintenanceDecisionExplanation(reason)}</p> : null}
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="health-primary-action"
+                  onClick={() =>
+                    setInspectedCase({
+                      caseId: group.cases[0].caseId,
+                      memoryUri: group.uri,
+                      title: group.preview?.title,
+                    })
+                  }
+                >
+                  Review memory and evidence
+                </button>
+              </section>
+            ) : null}
+            <p className="muted">
+              Review the evidence here, edit the memory in Library, or copy a task for your coding agent.
             </p>
             <div className="health-record-actions">
               <button
                 type="button"
                 onClick={() =>
-                  setTask(healthDecisionTask(props.project, group.findings, 'Determine the supported current claim'))
+                  setTask(
+                    healthDecisionTask(
+                      props.project,
+                      [...group.findings, ...group.cases],
+                      'Determine the supported current claim',
+                      group.uri,
+                    ),
+                  )
                 }
               >
-                Prepare claim review task
+                Review with agent…
               </button>
               <button
                 type="button"
@@ -605,56 +748,34 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                   setTask(
                     healthDecisionTask(
                       props.project,
-                      group.findings,
+                      [...group.findings, ...group.cases],
                       'Review whether the memory should be historical or archived',
+                      group.uri,
                     ),
                   )
                 }
               >
-                Prepare historical or archive decision
+                Ask agent about historical or archive options…
               </button>
             </div>
           </article>
         ))}
-        {unloadedDecisions.map(item => (
-          <article className="attention-card health-decision-card" key={item.caseId}>
-            <h4>{item.reason.replaceAll('-', ' ')}</h4>
-            <p>{maintenanceRecoveryInstruction(item.reason)}</p>
-            <button type="button" onClick={() => void inspectCase(item.caseId)}>
-              Inspect exact case and evidence
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                setTask(
-                  `Use $threadnote-health for project ${JSON.stringify(props.project)} and exact case ${JSON.stringify(item.caseId)}. Read its fresh decision packet, inspect current and historical evidence, and return supported choices. Do not repeat unchanged work or mutate shared knowledge without reviewed authority.`,
-                )
-              }
-            >
-              Prepare scoped decision task
-            </button>
-          </article>
-        ))}
+        {moreDecisionCases ? (
+          <button type="button" disabled={loadingHistory} onClick={() => void loadHistory('cases')}>
+            {loadingHistory ? 'Loading more reviews…' : 'Load more memories to review'}
+          </button>
+        ) : null}
         {props.nextCursor ? (
           <button type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>
             {props.loadingMore ? 'Loading decision details…' : 'Load more decision details'}
           </button>
         ) : null}
       </section>
-      {task ? (
-        <section className="attention-card" aria-label="Task for threadnote-health">
-          <h3>Task for threadnote-health</h3>
-          <p>Copy this task into your coding agent to compare the claim and review an exact change.</p>
-          <textarea
-            aria-label="Scoped health decision task"
-            readOnly
-            value={task}
-            rows={6}
-            onFocus={event => event.target.select()}
-          />
-        </section>
-      ) : null}
-      <section aria-label="Automatic recovery" className="attention-list health-recovery-list">
+      <section
+        hidden={tab !== 'recovery'}
+        aria-label="Automatic recovery"
+        className="attention-list health-recovery-list"
+      >
         <h3>Automatic recovery</h3>
         {causes.length === 0 ? (
           <p>No blocked recovery groups are reported. Queued evidence checks are tracked in coverage.</p>
@@ -681,7 +802,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           ))
         )}
       </section>
-      <section aria-label="Recent maintenance and history" className="attention-list health-history-list">
+      <section
+        hidden={tab !== 'history'}
+        aria-label="Recent maintenance and history"
+        className="attention-list health-history-list"
+      >
         <h3>Recent maintenance and history</h3>
         <p>
           Last progress:{' '}
@@ -741,7 +866,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             <p key={item.caseId}>
               {item.disposition.replaceAll('-', ' ')}: {item.reason.replaceAll('-', ' ')} · {item.attemptCount} attempts
               · last checked {item.lastChecked}{' '}
-              <button type="button" onClick={() => void inspectCase(item.caseId)}>
+              <button type="button" onClick={() => setInspectedCase({caseId: item.caseId})}>
                 Inspect exact case and evidence
               </button>
             </p>
@@ -753,107 +878,54 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           ) : null}
         </details>
       </section>
-      {retainedCase ? (
-        <section className="attention-card" aria-label="Retained maintenance case">
-          <h3>Retained case history</h3>
-          <p>Stable memory identity: {retainedCase.memoryId}</p>
-          {(retainedCase.archivedUri ?? retainedCase.subjectUri) ? (
-            <button
-              type="button"
-              onClick={() => props.onOpenLibrary(retainedCase.archivedUri ?? retainedCase.subjectUri)}
-            >
-              Inspect retained memory
-            </button>
-          ) : null}
-          {!packet ? (
+      {tab === 'hygiene' ? (
+        <section className="workspace-card">
+          <header>
+            <h3>Memory hygiene</h3>
+          </header>
+          <div className="workspace-pad">
             <p>
-              This history is read-only. The current record may be inactive, unavailable or changed; refresh maintenance
-              evidence before choosing a repair.
+              Find overlapping memories and preview a smaller, clearer set of context. Review the proposed changes
+              before applying.
             </p>
-          ) : null}
-          <p>
-            {retainedCase.caseId} · {retainedCase.disposition}
-          </p>
-          {retainedCase.events.map((event, index) => (
-            <p key={index}>
-              {event.at} — {event.reason}
-            </p>
-          ))}
-          <button
-            type="button"
-            onClick={() => {
-              setRetainedCase(undefined);
-              setPacket(undefined);
-            }}
-          >
-            Close retained case history
-          </button>
+            <WorkspaceUtilities
+              inline
+              panel="context-health"
+              project={props.project}
+              projects={props.projects}
+              onChanged={async () => props.onChanged()}
+            />
+          </div>
         </section>
       ) : null}
-      {packet ? (
-        <section className="attention-card" aria-label="Exact maintenance case">
-          <h3>{packet.reason.replaceAll('-', ' ')}</h3>
-          <p>
-            {packet.family} · {packet.slot}
-          </p>
-          <p>Evidence revision: {packet.evidenceRevision}</p>
-          <p>{packet.instructions}</p>
-          {packet.memoryUri ? (
-            <button type="button" onClick={() => props.onOpenLibrary(packet.memoryUri)}>
-              Open selected memory
-            </button>
-          ) : null}
-          {packet.evidenceSelectors?.map(selector => (
-            <button
-              type="button"
-              key={`${selector.memoryUri}:${selector.citationId}`}
-              onClick={() => void inspectCase(packet.caseId, selector)}
-            >
-              Read source for {selector.citationId}
-            </button>
-          ))}
-          {(packet.omittedEvidenceSelectors ?? 0) > 0 ? (
-            <p>
-              Open the selected memories for further citation IDs; each exact source can be read through the case packet
-              selector.
-            </p>
-          ) : null}
-          {packet.evidence?.excerpts.map(excerpt => (
-            <section key={`${excerpt.provenance}:${excerpt.excerptHash}`}>
-              <p>
-                {excerpt.provenance === 'historical-verified'
-                  ? 'Historical evidence; does not verify current source'
-                  : excerpt.supportsCitation
-                    ? 'Current citation support verified'
-                    : 'Changed current source; claim review required'}
-              </p>
-              <p>
-                {excerpt.source.path}:{excerpt.startLine}
-              </p>
-              <pre>{excerpt.content}</pre>
-            </section>
-          ))}
-          {packet.ownerProposal ? (
-            <section aria-label="Shared owner proposal">
-              <p>Read-only owner proposal: {packet.ownerProposal.proposalRevision}</p>
-              {packet.ownerProposal.selectedEdits.map((edit, index) => (
-                <p key={index}>
-                  {edit.operation}: {edit.relation.type} → {edit.relation.uri}
-                </p>
-              ))}
-              <p>{packet.ownerProposal.publication.instructions}</p>
-            </section>
-          ) : null}
-          <ul>
-            {packet.choices.map(choice => (
-              <li key={choice}>{choice}</li>
-            ))}
-          </ul>
-          <button type="button" onClick={() => setPacket(undefined)}>
-            Close case details
-          </button>
-        </section>
+      {inspectedCase ? (
+        <MaintenanceCaseDialog
+          key={`${props.project}:${inspectedCase.caseId}:${inspectedCase.memoryUri ?? ''}`}
+          project={props.project}
+          caseId={inspectedCase.caseId}
+          memoryUri={inspectedCase.memoryUri}
+          initialCase={cases.find(item => item.caseId === inspectedCase.caseId)}
+          relatedCases={
+            groups.find(
+              group =>
+                (inspectedCase.memoryUri === undefined || group.uri === inspectedCase.memoryUri) &&
+                group.cases.some(item => item.caseId === inspectedCase.caseId),
+            )?.cases
+          }
+          title={inspectedCase.title}
+          onClose={() => setInspectedCase(undefined)}
+          onChanged={refreshAfterDecision}
+          onOpenLibrary={uri => {
+            setInspectedCase(undefined);
+            props.onOpenLibrary(uri);
+          }}
+          onTask={value => {
+            setInspectedCase(undefined);
+            setTask(value);
+          }}
+        />
       ) : null}
+      {task ? <MaintenanceTaskDialog task={task} onClose={() => setTask('')} /> : null}
       {selected ? (
         <HealthDetail
           key={`${props.project}:${selected.caseId ?? selected.id}`}
@@ -861,7 +933,8 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           finding={selected}
           repairsAvailable={props.report.repositoryEvidence.state === 'available'}
           onClose={() => setSelected(undefined)}
-          onChanged={props.onChanged}
+          onChanged={refreshAfterDecision}
+          onRefresh={refreshEvidence}
           onOpenLibrary={props.onOpenLibrary}
         />
       ) : null}

@@ -1,3 +1,4 @@
+import {MarkdownViewer} from './ui/controls.js';
 import React, {useEffect, useRef, useState} from 'react';
 import type {
   ManagerCitationRepairJobResponseV1,
@@ -59,23 +60,26 @@ interface CitationRepairApplyResult {
 }
 
 export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
-  const [selected, setSelected] = useState<{reviewId: string; candidateId: string}>();
+  const [view, setView] = useState<'pending' | 'deferred' | 'history'>('pending');
+  const [selected, setSelected] = useState<{reviewId: string; candidateId: string; project: string}>();
   const [generation, setGeneration] = useState(0);
   const [inbox, setInbox] = useState<ManagerReviewInboxResponseV1>();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     setSelected(undefined);
-    if (!props.project) {
-      setInbox(undefined);
-      return;
-    }
     let cancelled = false;
+    const controller = new AbortController();
+    setInbox(undefined);
     setLoading(true);
     setError('');
-    void api<ManagerReviewInboxResponseV1>(`/api/reviews?project=${encodeURIComponent(props.project)}`)
+    void api<ManagerReviewInboxResponseV1>(
+      `/api/reviews?project=${encodeURIComponent(props.project)}&view=${view}`,
+      undefined,
+      {signal: controller.signal, timeoutMilliseconds: 8_000},
+    )
       .then(result => {
-        if (!cancelled) setInbox(result);
+        if (!cancelled && result.project === props.project) setInbox(result);
       })
       .catch(cause => {
         if (!cancelled) setError(errorMessage(cause));
@@ -85,34 +89,47 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [props.project, props.refreshGeneration, generation]);
+  }, [props.project, props.refreshGeneration, generation, view]);
 
   return (
     <section aria-busy={loading} className="panel attention-panel is-active">
-      <AttentionHeader
-        eyebrow="Knowledge review"
-        onProjectChange={props.onProjectChange}
-        project={props.project}
-        projects={props.projects}
-        summary="Review the exact proposed memories that still need a decision."
-        title="Review inbox"
-      />
-      {!props.project ? (
-        <AttentionEmpty text="Select a project to load its pending reviews." />
-      ) : error ? (
+      <div className="workspace-tabs" role="tablist" aria-label="Review sections">
+        {(['pending', 'deferred', 'history'] as const).map(value => (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={view === value}
+            className={view === value ? 'is-active' : undefined}
+            onClick={() => setView(value)}
+          >
+            {value.charAt(0).toUpperCase() + value.slice(1)}
+          </button>
+        ))}
+      </div>
+      {error ? (
         <AttentionError error={error} />
       ) : loading ? (
         <AttentionEmpty text="Loading the review inbox…" />
-      ) : !inbox || inbox.pendingCount === 0 ? (
-        <AttentionEmpty text={`No knowledge reviews need attention for ${props.project}.`} />
+      ) : !inbox || inbox.items.length === 0 ? (
+        <AttentionEmpty
+          text={
+            view === 'pending'
+              ? `No knowledge reviews need attention for ${props.project || 'all projects'}.`
+              : `No ${view === 'history' ? 'completed' : 'deferred'} reviews for ${props.project || 'all projects'}.`
+          }
+        />
       ) : (
         <div className="attention-list">
           {inbox.items.map(review => (
             <article className="attention-card" key={review.reviewId}>
               <header>
                 <div>
-                  <span className="attention-kicker">{review.topic || 'Untitled review'}</span>
+                  <span className="attention-kicker">
+                    {!props.project ? `${review.project} · ` : ''}
+                    {review.topic || 'Untitled review'}
+                  </span>
                   <h3>{review.task}</h3>
                 </div>
                 <span className="attention-count">{review.candidates.length}</span>
@@ -128,13 +145,21 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                       <span>{candidate.recommendation.replaceAll('_', ' ')}</span>
                       <span>{Math.round(candidate.confidence * 100)}% confidence</span>
                     </div>
+                    <div className="review-proposal-preview">
+                      <MarkdownViewer markdown={candidate.proposedText} />
+                    </div>
                     <button
-                      className="attention-item-button"
-                      onClick={() => setSelected({reviewId: review.reviewId, candidateId: candidate.candidateId})}
+                      className="attention-review-button"
+                      onClick={() =>
+                        setSelected({
+                          reviewId: review.reviewId,
+                          candidateId: candidate.candidateId,
+                          project: review.project,
+                        })
+                      }
                       type="button"
                     >
-                      <pre>{candidate.proposedText}</pre>
-                      <strong>Review and decide →</strong>
+                      <strong>{view === 'history' ? 'View review details →' : 'Review and decide →'}</strong>
                     </button>
                     <p>{candidate.reason}</p>
                     {candidate.targetUri ? <code>{candidate.targetUri}</code> : null}
@@ -145,7 +170,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
           ))}
         </div>
       )}
-      {inbox && inbox.pendingCount > 0 ? (
+      {inbox && inbox.items.length > 0 && view !== 'history' ? (
         <footer className="attention-footer">
           <p>Open a proposal to read it in full and approve, defer, or reject it.</p>
           <button onClick={() => props.onOpenLibrary()} type="button">
@@ -155,9 +180,8 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       ) : null}
       {selected ? (
         <ReviewDetail
-          key={`${props.project}:${selected.reviewId}:${selected.candidateId}`}
+          key={`${selected.project}:${selected.reviewId}:${selected.candidateId}`}
           {...selected}
-          project={props.project}
           onClose={() => setSelected(undefined)}
           onChanged={() => setGeneration(value => value + 1)}
           onOpenLibrary={props.onOpenLibrary}
@@ -351,6 +375,45 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         setCitationRepairJobStarting(false);
       }
     }
+  }
+
+  if (!props.project) {
+    return (
+      <section className="panel attention-panel is-active">
+        <AttentionHeader
+          eyebrow="Memory quality"
+          onProjectChange={props.onProjectChange}
+          project=""
+          projects={props.projects}
+          summary="Inspect context health within each project’s repository evidence."
+          title="Context health across projects"
+        />
+        <p className="muted">
+          Health checks and repairs are scoped to one project. Choose a project to see its current findings and
+          maintenance status.
+        </p>
+        {props.projects.length === 0 ? (
+          <AttentionEmpty text="No projects are available yet. Save a project memory or configure a repository to get started." />
+        ) : (
+          <div className="health-project-grid">
+            {props.projects.map(project => (
+              <button
+                aria-label={`Inspect ${project}`}
+                className="health-project-tile"
+                key={project}
+                onClick={() => props.onProjectChange(project)}
+                type="button"
+              >
+                <strong>{project}</strong>
+                <span>
+                  View context health <span aria-hidden="true">→</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+    );
   }
 
   if (report?.maintenance !== undefined && report.project === props.project) {
@@ -976,7 +1039,7 @@ function AttentionHeader(props: {
       <label>
         Project
         <select onChange={event => props.onProjectChange(event.target.value)} value={props.project}>
-          <option value="">Select project</option>
+          <option value="">All</option>
           {props.projects.map(project => (
             <option key={project}>{project}</option>
           ))}

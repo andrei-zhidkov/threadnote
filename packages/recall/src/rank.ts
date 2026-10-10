@@ -1,3 +1,4 @@
+import type {ExternalResourceMetadata} from '@threadnote/store/external-resource';
 import type {MemoryAuthority, MemoryRelation, MemoryTrust} from '@threadnote/memory/document';
 import {stripGeneratedMemoryHygieneSources} from '@threadnote/memory/hygiene/provenance';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -24,6 +25,7 @@ export interface RecallCandidate {
   /** Other authorized URIs that resolve to the same logical memory and canonical body. */
   readonly equivalentUris?: readonly string[];
   readonly exactTerms?: readonly string[];
+  readonly externalSource?: ExternalResourceMetadata & {readonly fetchedAt: number};
   readonly feedback?: number;
   readonly fields?: RecallFields;
   /** The same memory_id was observed with more than one body digest in the authorized candidate set. */
@@ -44,6 +46,7 @@ export interface RecallCandidate {
 
 export interface RecallRankContext {
   readonly allowExactRescue?: boolean;
+  readonly allowSemanticRescue?: boolean;
   readonly corpusStatistics?: RecallCorpusStatistics;
   readonly eligibility?: RecallEligibilityPolicy;
   readonly includeInactive?: boolean;
@@ -313,11 +316,16 @@ export function rankRecallCandidates(
     )
     .filter(result => {
       const protectedResult = protectedRecallOrdinal(result.candidate, protectedOrdinalByUri) !== undefined;
+      const semanticRescue =
+        context.allowSemanticRescue === true &&
+        result.signals.semantic >= CORROBORATING_SIGNAL_MINIMUM &&
+        result.relevanceScore >= SEMANTIC_ONLY_ANSWER_MINIMUM;
       return (
         (protectedResult ||
           (result.passedRelevanceGate &&
             (context.minimumScore === undefined ||
               result.relevanceScore >= context.minimumScore ||
+              semanticRescue ||
               (context.allowExactRescue === true &&
                 result.signals.exact >= EXACT_TERM_RESCUE_MINIMUM &&
                 (result.signals.kindIntent === 1 ||

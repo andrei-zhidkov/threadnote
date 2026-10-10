@@ -1,3 +1,4 @@
+import {assertImportedMemoryAssociation, validateImportedMemory} from './pack_validation.js';
 import {normalizeReferenceUris} from '@threadnote/memory/references';
 import {Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Result, Schema} from 'effect';
 import {
@@ -19,7 +20,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
 import {withAnonymousTelemetryPhase} from '../effect/telemetry.js';
 import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
-import {syncObsidianSourcesBeforeRecall} from '../obsidian/source.js';
+import {syncSourcesBeforeRecall} from '@threadnote/integration-core/source-sync';
 import {
   canonicalResourceUri,
   parseResourceId,
@@ -46,8 +47,6 @@ import {applyCliCompactKeepUpdates} from './hygiene/apply.js';
 import {
   assertMemoryDocumentSchemaWritable,
   formatMemoryDocument,
-  memoryArchiveBody,
-  memoryArchiveMetadata,
   type MemoryMetadata,
 } from '@threadnote/memory/document';
 import {captureMemoryCodeCitations, MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
@@ -87,6 +86,9 @@ import {
 import {memoryReadRecoveryForError, memoryReadRecoveryText} from '@threadnote/memory/read/recovery';
 import {resolveLocalMemoryReplacementTarget, resolveStoreMemoryReplacementOptions} from './replacement_target.js';
 import type {StoreMemoryOptions} from './store_contract.js';
+import {consolidationRevision} from '@threadnote/memory/consolidation';
+import {runArchive} from './archive.js';
+export {runArchive} from './archive.js';
 import {
   attemptSync,
   ensureMemoryDirectory,
@@ -128,7 +130,6 @@ import type {RecallConfidence} from '@threadnote/recall/rank';
 import {parseRecallCliInput, projectRecallCliResponse} from '../recall/cli_response.js';
 import type {RecallMemoryConnectionsResult} from '@threadnote/recall/memory/connections';
 import type {
-  ArchiveOptions,
   CompactOptions,
   FinalizeCodeRefsOptions,
   ForgetOptions,
@@ -387,7 +388,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
   const navigationOnly = query.length === 0;
   if (options.dryRun !== true) {
     yield* withAnonymousTelemetryPhase('recall.shared-sync', syncSharedReposAndLog(config));
-    yield* withAnonymousTelemetryPhase('recall.obsidian-sync', syncObsidianSourcesAndLog(config));
+    yield* withAnonymousTelemetryPhase('recall.obsidian-sync', syncSourcesAndLog(config));
   }
   const includeWorkspaceComponent = !navigationOnly && !options.uri && !options.workset;
   const workspaceOptions = options.callerCwd
@@ -513,6 +514,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
     explicitProject: options.project?.trim() || undefined,
     originalQuery: query,
     pinnedHardUri: explicitUri !== undefined,
+    workspaceProject: workset ? undefined : recallProjectName,
     worksetProjectNames: workset?.projects.map(member => member.name),
   });
 
@@ -578,6 +580,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
       Effect.gen(function* () {
         const prepared = yield* prepareRecallSections(config, {
           allowExactRescue: !thresholdConfigured,
+          allowSemanticRescue: !thresholdConfigured,
           allowedUriScopes: explicitUri ? [explicitUri] : undefined,
           candidateUris,
           exactMatches,
@@ -817,18 +820,18 @@ function formatSharedCompactAudit(audit: {
   ].join('\n');
 }
 
-const syncObsidianSourcesAndLog = Effect.fn('memory.syncObsidianSourcesAndLog')(function* (config: RuntimeConfig) {
-  const syncResult = yield* syncObsidianSourcesBeforeRecall(config).pipe(
+const syncSourcesAndLog = Effect.fn('memory.syncSourcesAndLog')(function* (config: RuntimeConfig) {
+  const syncResult = yield* syncSourcesBeforeRecall(config).pipe(
     Effect.catch(error => {
       const message = error instanceof Error ? error.message : String(error);
-      return Console.error(`Auto-sync warning: Obsidian source refresh failed: ${message}`).pipe(Effect.as(undefined));
+      return Console.error(`Auto-sync warning: Source refresh failed: ${message}`).pipe(Effect.as(undefined));
     }),
   );
   if (!syncResult) {
     return;
   }
   if (syncResult.syncedSources.length > 0) {
-    yield* Console.error(`Auto-synced Obsidian sources: ${syncResult.syncedSources.join(', ')}`);
+    yield* Console.error(`Auto-synced sources: ${syncResult.syncedSources.join(', ')}`);
   }
   for (const warning of syncResult.warnings) {
     yield* Console.error(`Auto-sync warning: ${warning}`);
@@ -1152,101 +1155,6 @@ export const runHandoff = Effect.fn('runHandoff')(function* (config: RuntimeConf
   yield* logKeywordReplaceReceipt(keywordPlan, replaced?.metadata.keywords, {dryRun: options.dryRun});
 });
 
-export const runArchive = Effect.fn('runArchive')(function* (
-  config: RuntimeConfig,
-  uri: string,
-  options: ArchiveOptions,
-) {
-  yield* attemptSync(() => assertResourceUri(uri));
-  const ov = NATIVE_RESOURCE_BACKEND;
-  const store = yield* ResourceStore;
-  if (options.dryRun === true) {
-    const fallbackMetadata: MemoryMetadata = {
-      archivedFrom: uri,
-      kind: options.kind ?? 'handoff',
-      project: normalizeOptionalMetadata(options.project),
-      sourceAgentClient: 'threadnote',
-      status: 'archived',
-      timestamp: DateTime.formatIso(yield* DateTime.now),
-      topic: normalizeOptionalMetadata(options.topic),
-    };
-    yield* storeMemory(config, {
-      bodyText: ['Archived original Threadnote memory.', '', '<original memory content would be read here>'].join('\n'),
-      dryRun: true,
-      metadata: fallbackMetadata,
-      title: 'MEMORY',
-    });
-    yield* Console.log(`Would remove archived native resource: ${uri}`);
-    return;
-  }
-  const fs = yield* FileSystem.FileSystem;
-  const invalidatedUris = options.invalidatedUris ?? [uri];
-  yield* withMemoryUriLocks(
-    fs,
-    config.agentContextHome,
-    [uri],
-    Effect.gen(function* () {
-      const originalMemory = (yield* store.read(resourceStoreLocation(config), uri)).trim();
-      if (options.expectedContent !== undefined && originalMemory !== options.expectedContent.trim()) {
-        return yield* MemoryOperationError.make({
-          message: `Memory ${uri} changed after the hygiene plan. Re-run compact before archiving.`,
-        });
-      }
-      yield* attemptSync(() => assertMemoryDocumentSchemaWritable(originalMemory));
-      const sourceRecord = parseMemoryDocument(uri, originalMemory);
-      if (!sourceRecord) return yield* MemoryOperationError.make({message: `Cannot archive invalid memory ${uri}.`});
-      const inferredMetadata = sourceRecord.metadata;
-      if (inferredMetadata.citationErrors && inferredMetadata.citationErrors.length > 0) {
-        const reasons = [...new Set(inferredMetadata.citationErrors.map(error => error.reason))].sort().join(', ');
-        return yield* MemoryOperationError.make({
-          message: `Cannot archive ${uri}: malformed code citation metadata (${reasons}) must be repaired or recaptured first.`,
-        });
-      }
-      const metadata = memoryArchiveMetadata(inferredMetadata, {
-        archivedFrom: uri,
-        kind: options.kind ?? inferredMetadata.kind ?? 'handoff',
-        project: normalizeOptionalMetadata(options.project),
-        sourceAgentClient: 'threadnote',
-        timestamp: DateTime.formatIso(yield* DateTime.now),
-        topic: normalizeOptionalMetadata(options.topic),
-      });
-      const archiveUri = yield* storeMemory(config, {
-        bodyText: memoryArchiveBody(sourceRecord.body),
-        deferRecallIndexRefresh: true,
-        dryRun: false,
-        metadata,
-        skipMemoryIdentityLock: true,
-        title: 'MEMORY',
-      });
-      invalidatedUris.push(archiveUri);
-      const currentSource = yield* store.read(resourceStoreLocation(config), uri).pipe(Effect.option);
-      if (Option.isNone(currentSource) || currentSource.value.trim() !== originalMemory) {
-        const rolledBack = yield* removeResourceWithRetry(ov, config, archiveUri);
-        return yield* MemoryOperationError.make({
-          message: rolledBack
-            ? `Memory ${uri} changed while its archive was being stored. The archived copy was rolled back; re-run the operation.`
-            : `Memory ${uri} changed while its archive was being stored. The source was preserved, but cleanup of ${archiveUri} needs review.`,
-        });
-      }
-      const removedOriginal = yield* removeResourceWithRetry(ov, config, uri, {
-        alreadyLocked: true,
-      });
-      if (removedOriginal) {
-        yield* discardDeferredCodeAnchorIntent(config, uri);
-        yield* Console.log(`Archived original memory: ${uri}`);
-      } else {
-        yield* Console.error(`Archive stored and the original is no longer present: ${uri}`);
-      }
-    }),
-  ).pipe(
-    Effect.ensuring(
-      options.deferRecallIndexRefresh
-        ? Effect.void
-        : refreshRecallDerivedIndexesAfterCanonicalMutation(config, invalidatedUris).pipe(Effect.asVoid),
-    ),
-  );
-});
-
 export const runForget = Effect.fn('runForget')(function* (config: RuntimeConfig, uri: string, options: ForgetOptions) {
   const id = yield* attemptSync(() => {
     assertResourceUri(uri);
@@ -1273,9 +1181,19 @@ export const runForget = Effect.fn('runForget')(function* (config: RuntimeConfig
     Effect.gen(function* () {
       const store = yield* ResourceStore;
       const entry = yield* store.stat(resourceStoreLocation(config), canonicalUri);
+      let expectedFingerprint: string | undefined;
+      if (options.expectedRevision !== undefined) {
+        const current = yield* store.read(resourceStoreLocation(config), canonicalUri);
+        if (entry.type === 'directory' || consolidationRevision(current) !== options.expectedRevision)
+          return yield* MemoryOperationError.make({
+            message: `Memory ${canonicalUri} changed after consolidation review. Source cleanup was refused.`,
+          });
+        expectedFingerprint = yield* store.fingerprint(current);
+      }
       const removed = yield* removeResourceWithRetry(NATIVE_RESOURCE_BACKEND, config, canonicalUri, {
         alreadyLocked: true,
         recursive: entry.type === 'directory',
+        expectedFingerprint,
       });
       if (!removed) {
         return yield* MemoryOperationError.make({message: `Resource does not exist: ${canonicalUri}`});
@@ -1378,6 +1296,12 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
     }
     destinations.add(collisionKey);
   }
+  const managed = planned.filter(resource => resourceIdIsManagedMemoryNamespace(resource.uri));
+  const incoming = new Map(
+    yield* Effect.forEach(managed, resource =>
+      attemptSync(() => [resource.uri, validateImportedMemory(resource.uri, resource.content)] as const),
+    ),
+  );
   const store = yield* ResourceStore;
   const mutations: ResourceStoreMutation[] = [];
   for (const resource of planned) {
@@ -1394,7 +1318,7 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
   }
   if (options.dryRun !== true) {
     const mutation = store.mutate(resourceStoreLocation(config), mutations);
-    const managedMemoryUris = planned.map(resource => resource.uri).filter(resourceIdIsManagedMemoryNamespace);
+    const managedMemoryUris = managed.map(resource => resource.uri);
     if (managedMemoryUris.length === 0) {
       yield* mutation;
     } else {
@@ -1402,7 +1326,19 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
         fs,
         config.agentContextHome,
         managedMemoryUris,
-        mutation.pipe(
+        Effect.forEach(managed, resource =>
+          store.read(resourceStoreLocation(config), resource.uri).pipe(
+            Effect.catchTag('ResourceNotFound', () => Effect.void),
+            Effect.flatMap(existing =>
+              existing === undefined
+                ? Effect.void
+                : attemptSync(() =>
+                    assertImportedMemoryAssociation(resource.uri, existing, incoming.get(resource.uri)),
+                  ),
+            ),
+          ),
+        ).pipe(
+          Effect.andThen(mutation),
           Effect.andThen(
             Effect.forEach(
               managedMemoryUris,
@@ -1532,6 +1468,27 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
   }
   const options = yield* resolveStoreMemoryReplacementOptions(config, input);
   const replaceUri = options.replaceUri;
+  if (replaceUri) {
+    const current = yield* resolveLocalMemoryReplacementTarget(config, replaceUri);
+    if (
+      current.record?.metadata.obsidianEvidence &&
+      JSON.stringify(current.record.metadata.obsidianEvidence) !== JSON.stringify(options.metadata.obsidianEvidence)
+    ) {
+      return yield* MemoryOperationError.make({
+        message:
+          'Replacement would discard or change pinned Obsidian evidence. Derive a new memory from the exact synced note revision.',
+      });
+    }
+    if (
+      current.record?.metadata.sourceEvidence &&
+      JSON.stringify(current.record.metadata.sourceEvidence) !== JSON.stringify(options.metadata.sourceEvidence)
+    ) {
+      return yield* MemoryOperationError.make({
+        message:
+          'Replacement would discard or change pinned source evidence. Derive a new memory from the exact synced source revision.',
+      });
+    }
+  }
   const ov = NATIVE_RESOURCE_BACKEND;
   if (replaceUri && isInSharedNamespace(config, replaceUri)) {
     if (options.deferredCodeAnchor) {
@@ -1575,7 +1532,14 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
   const candidateMetadata: MemoryMetadata =
     replaceUri === undefined ? options.metadata : {...options.metadata, supersedes: replaceUri};
   const candidateMemory = formatMemoryDocument(options.title, candidateMetadata, options.bodyText);
-  const memoryUri = yield* memoryUriFor(config, candidateMemory, candidateMetadata);
+  if (
+    options.consolidationArchiveKey &&
+    (!/^[a-f0-9]{64}$/.test(options.consolidationArchiveKey) || candidateMetadata.status !== 'archived')
+  )
+    return yield* MemoryOperationError.make({message: 'Invalid consolidation archive identity.'});
+  const memoryUri = options.consolidationArchiveKey
+    ? `${memoryDirectoryUri(config, candidateMetadata)}/consolidation-${options.consolidationArchiveKey}.md`
+    : yield* memoryUriFor(config, candidateMemory, candidateMetadata);
   const isInPlaceUpdate = replaceUri !== undefined && replaceUri === memoryUri;
   const finalMetadata: MemoryMetadata = isInPlaceUpdate
     ? {...options.metadata, supersedes: undefined}
@@ -1585,7 +1549,10 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
     : candidateMemory;
   if (options.dryRun) {
     yield* assertPersonalMemoryDestinationWritable(config, memoryUri, replaceUri);
-    const writeMode = yield* memoryWriteMode(ov, config, memoryUri, finalMetadata);
+    const writeMode =
+      options.createOnly || options.consolidationArchiveKey
+        ? 'create'
+        : yield* memoryWriteMode(ov, config, memoryUri, finalMetadata);
     yield* Console.log(memory);
     yield* Console.log(`\nWould ${writeMode} native resource: ${memoryUri}`);
     if (replaceUri && !isInPlaceUpdate) {
@@ -1601,6 +1568,19 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
   const fs = yield* FileSystem.FileSystem;
   const write = Effect.gen(function* () {
     const store = yield* ResourceStore;
+    if (options.consolidationArchiveKey) {
+      const existing = yield* store
+        .read(resourceStoreLocation(config), memoryUri)
+        .pipe(Effect.catchTag('ResourceNotFound', () => Effect.void));
+      if (existing !== undefined) {
+        if (existing.trim() !== memory.trim())
+          return yield* MemoryOperationError.make({
+            message: `Consolidation archive ${memoryUri} changed. Source cleanup was refused.`,
+          });
+        yield* Console.log(`Reused verified consolidation archive: ${memoryUri}`);
+        return;
+      }
+    }
     const destination = yield* assertPersonalMemoryDestinationWritable(config, memoryUri, replaceUri);
     yield* verifyAuthoredMemoryRelationTargetIdentities(config, options.expectedSourceContent ?? []);
     if (replaceUri) {
@@ -1616,7 +1596,10 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
     }
     const relocationSourceContent =
       replaceUri && !isInPlaceUpdate ? yield* store.read(resourceStoreLocation(config), replaceUri) : undefined;
-    const writeMode = yield* memoryWriteMode(ov, config, memoryUri, finalMetadata);
+    const writeMode =
+      options.createOnly || options.consolidationArchiveKey
+        ? 'create'
+        : yield* memoryWriteMode(ov, config, memoryUri, finalMetadata);
     yield* ensureMemoryDirectory(ov, config, memoryDirectoryUri(config, finalMetadata));
     const stagedDeferredCodeAnchor = options.deferredCodeAnchor
       ? yield* stageDeferredCodeAnchorIntent(config, {

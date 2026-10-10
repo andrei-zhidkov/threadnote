@@ -17,7 +17,6 @@ import {
   parseDoctorChecksFromOutput,
   readManagedMemory,
   resourcesTree,
-  runManage,
 } from '@threadnote/threadnote/manager/index';
 import {
   removeManagerSharedMemorySource,
@@ -536,14 +535,6 @@ describe('manager catalog', () => {
       );
   });
 
-  it('refuses to start while native graph repair or maintenance is active', async () => {
-    const config = await makeRuntime();
-    homes.push(config.agentContextHome);
-    await expect(
-      runEffect(withCodeGraphMaintenanceIntent(config.agentContextHome, runManage(config, {open: false, uiPort: 0}))),
-    ).rejects.toThrow('Native code graph repair or maintenance is in progress');
-  });
-
   it('maps local memory files into Threadnote URIs with parsed metadata', async () => {
     const config = await makeRuntime();
     homes.push(config.agentContextHome);
@@ -749,9 +740,10 @@ describe('manager http API', () => {
     homes.push(config.agentContextHome);
     const server = await startServer(config, 'secret');
     try {
-      const [htmlResponse, cssResponse] = await Promise.all([
+      const [htmlResponse, cssResponse, editorCssResponse] = await Promise.all([
         testHttpFetch(`${server.url}/`),
         testHttpFetch(`${server.url}/app.css`),
+        testHttpFetch(`${server.url}/editor.css`),
       ]);
 
       expect(htmlResponse.status).toBe(200);
@@ -760,6 +752,8 @@ describe('manager http API', () => {
       expect(cssResponse.status).toBe(200);
       expect(cssResponse.headers.get('content-type')).toContain('text/css');
       expect(await cssResponse.text()).toContain(':root');
+      expect(editorCssResponse.status).toBe(200);
+      expect(await editorCssResponse.text()).toContain('.mdxeditor');
     } finally {
       await server.close();
     }
@@ -3338,7 +3332,9 @@ describe('manager consolidation agents', () => {
   it('uses the current codex exec CLI flags', () => {
     const script = consolidationAgentScript('codex', '/Applications/Codex CLI/codex');
 
-    expect(script).toBe('\'/Applications/Codex CLI/codex\' exec --sandbox read-only --skip-git-repo-check - < "$1"');
+    expect(script).toBe(
+      '\'/Applications/Codex CLI/codex\' exec --sandbox read-only --skip-git-repo-check --json --output-last-message "$2" - < "$1"',
+    );
     expect(script).not.toContain('--ask-for-approval');
   });
 

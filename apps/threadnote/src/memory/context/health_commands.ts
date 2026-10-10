@@ -22,6 +22,7 @@ import {
 } from '@threadnote/context/health';
 import {readActiveProjectMemoryRecords, readMaintenanceMemoryRecords} from '../maintenance/records.js';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {isAgentArtifactUri} from '@threadnote/memory/document';
 import {MemoryOperationError} from '../migrations.js';
 import {guidanceHealthEvidence} from '../../guidance/index.js';
 import {
@@ -32,6 +33,7 @@ import {
   projectContextHealthRecords,
   type ContextHealthSelectorV1,
 } from './health_selector.js';
+import {reviewedSemanticContradictionIds} from './semantic_review_state.js';
 
 export interface RunContextHealthOptionsV1 {
   readonly after?: string;
@@ -128,6 +130,7 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
   const candidateEvidence = yield* candidateStatusEvidence(config, project);
   const guidanceEvidence = yield* guidanceHealthEvidence(config, project, cwd);
   const report = buildContextHealthReport({
+    reviewedSemanticContradictionIds: yield* reviewedSemanticContradictionIds(config, project, records),
     after: options.after,
     candidateEvidence,
     guidanceEvidence,
@@ -180,47 +183,49 @@ const relationStatusEvidence = Effect.fn('memory.contextHealth.relationEvidence'
   }));
   const allowedScopes = [`threadnote://user/${uriSegment(config.user)}/memories`];
   return records.flatMap(record =>
-    (record.metadata.relations ?? []).map(relation => {
-      const memoryId = memoryIdFromIdentityAlias(relation.uri);
-      const resolution =
-        memoryId === undefined
-          ? undefined
-          : classifyMemoryIdentityCandidates(identityCandidates, memoryId, allowedScopes);
-      const directMatches =
-        memoryId === undefined
-          ? corpus.filter(
-              candidate =>
-                candidate.uri === relation.uri ||
-                (candidate.metadata.status !== 'active' && candidate.metadata.archivedFrom === relation.uri),
-            )
-          : undefined;
-      const target =
-        resolution?.state === 'resolved'
-          ? corpus.find(candidate => candidate.uri === resolution.uri)
-          : memoryId === undefined
-            ? directMatches?.length === 1
-              ? directMatches[0]
-              : undefined
+    (record.metadata.relations ?? [])
+      .filter(relation => !isAgentArtifactUri(relation.uri))
+      .map(relation => {
+        const memoryId = memoryIdFromIdentityAlias(relation.uri);
+        const resolution =
+          memoryId === undefined
+            ? undefined
+            : classifyMemoryIdentityCandidates(identityCandidates, memoryId, allowedScopes);
+        const directMatches =
+          memoryId === undefined
+            ? corpus.filter(
+                candidate =>
+                  candidate.uri === relation.uri ||
+                  (candidate.metadata.status !== 'active' && candidate.metadata.archivedFrom === relation.uri),
+              )
             : undefined;
-      const inactiveIdentityMatches =
-        memoryId === undefined
-          ? []
-          : corpus.filter(
-              candidate => candidate.metadata.memoryId === memoryId && candidate.metadata.status !== 'active',
-            );
-      return {
-        sourceUri: record.uri,
-        status:
-          resolution?.state === 'ambiguous' || (directMatches !== undefined && directMatches.length > 1)
-            ? 'conflicted'
-            : target?.metadata.status === 'active'
-              ? 'active'
-              : target !== undefined || inactiveIdentityMatches.length > 0
-                ? 'inactive'
-                : 'missing',
-        targetUri: relation.uri,
-      } satisfies ContextHealthRelationEvidenceV1;
-    }),
+        const target =
+          resolution?.state === 'resolved'
+            ? corpus.find(candidate => candidate.uri === resolution.uri)
+            : memoryId === undefined
+              ? directMatches?.length === 1
+                ? directMatches[0]
+                : undefined
+              : undefined;
+        const inactiveIdentityMatches =
+          memoryId === undefined
+            ? []
+            : corpus.filter(
+                candidate => candidate.metadata.memoryId === memoryId && candidate.metadata.status !== 'active',
+              );
+        return {
+          sourceUri: record.uri,
+          status:
+            resolution?.state === 'ambiguous' || (directMatches !== undefined && directMatches.length > 1)
+              ? 'conflicted'
+              : target?.metadata.status === 'active'
+                ? 'active'
+                : target !== undefined || inactiveIdentityMatches.length > 0
+                  ? 'inactive'
+                  : 'missing',
+          targetUri: relation.uri,
+        } satisfies ContextHealthRelationEvidenceV1;
+      }),
   );
 });
 
@@ -268,13 +273,22 @@ export function renderContextHealth(
           `Maintenance progress: threadnote context maintain --action status --project ${shellQuote(report.project)}`,
         ]),
     ...(selector === undefined ? [] : [`Active selector: ${contextHealthSelectorDescription(selector)}.`]),
-    `Semantic evidence: ${report.semanticCompleteness.state}; ${report.semanticCompleteness.analyzedRecords}/${report.semanticCompleteness.eligibleRecords} durable record(s) analyzed, ${report.semanticCompleteness.unknownRecords} unknown.`,
+    `Bounded English extraction: ${report.semanticCompleteness.state}; ${report.semanticCompleteness.analyzedRecords}/${report.semanticCompleteness.eligibleRecords} durable record(s) analyzed, ${report.semanticCompleteness.unknownRecords} unknown.`,
   ];
   if (visibleFindings.length <= 12) {
     lines.push(
       ...visibleFindings.flatMap(finding => [
         `- ${finding.severity} ${finding.category}: ${finding.summary}`,
         ...(findingOwner(finding) === undefined ? [] : [`  owner: ${findingOwner(finding)}`]),
+        ...(finding.semanticEvidence === undefined
+          ? []
+          : [
+              `  comparison: ${finding.semanticEvidence.reason}; ${finding.semanticEvidence.classification}${finding.semanticEvidence.uncertainty.length === 0 ? '' : `; needs context: ${finding.semanticEvidence.uncertainty.join(', ')}`}`,
+              ...[finding.semanticEvidence.left, finding.semanticEvidence.right].map(
+                claim =>
+                  `  claim: ${JSON.stringify(claim.text)} (${claim.role}; environment=${claim.context.environment ?? 'unknown'}; headings=${claim.context.headings.join(' / ') || 'none'}; workspace=${claim.context.workspaceScope ?? 'repository'}; validity=${claim.context.validFrom ?? 'unknown'}..${claim.context.validTo ?? 'unknown'}; uri=${claim.recordUri}; body-span=${claim.span.start}..${claim.span.end}; revision=${claim.recordContentFingerprint})`,
+              ),
+            ]),
       ]),
     );
   } else {

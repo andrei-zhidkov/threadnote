@@ -1,3 +1,4 @@
+import {MANAGER_STATIC_FILES as STATIC_FILES} from './static-files.js';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import {
   Cause,
@@ -26,8 +27,24 @@ import {
   runEffectAiConsolidation,
   runNativeAiConsolidation,
 } from '../effect/ai/consolidator.js';
+import {applyReviewedConsolidation, type ReviewedConsolidationJob} from './consolidation.js';
+import {
+  captureConsolidationSource,
+  MAX_CONSOLIDATION_SOURCES,
+  type ConsolidationSource,
+} from '@threadnote/memory/consolidation';
 import {startManagerContextSchedulers} from './context_runtime.js';
+import {ManagerOperationError} from './operation_error.js';
+import {assertManagerSourceAssets} from './source_assets.js';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {
+  availableConsolidationModels,
+  selectConsolidationModel,
+  ConsolidationModelsError,
+  type ConsolidationModel,
+} from './consolidation_models.js';
+import {runConsolidationAgentCommand} from './consolidation_agent.js';
+export {consolidationAgentScript} from './consolidation_agent.js';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -96,6 +113,8 @@ import {runSeed, runSeedSkills} from '../seeding.js';
 import {readManagerRuntimeState} from './state.js';
 import {handleManagerWorkflowRequest} from './workflow.js';
 import {handleManagerProcessRequest} from './processes.js';
+import {handleManagerSharingConflictRequest} from './sharing_conflicts.js';
+import {handleManagerIntegrationRequest} from '../integrations/manager.js';
 import {handleManagerWorkspaceRequest} from './value.js';
 import {emptyManagerTree, readManagerTreeRoot} from '@threadnote/manager/tree';
 import {
@@ -106,7 +125,6 @@ import {
 import * as graphProjects from './graph/projects.js';
 import * as graphActions from './graph/actions.js';
 import {
-  cleanupMode,
   consolidationAgent,
   memoryKind,
   memoryStatus,
@@ -156,10 +174,10 @@ import {
   managerGraphVisualization,
   managerGraphViewsPage,
 } from '@threadnote/graph/visualization';
-import type {AgentClient, ConsolidationAgent, DoctorCheck, ManageOptions} from '../types.js';
+import type {ConsolidationAgent, DoctorCheck, ManageOptions} from '../types.js';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {assertResourceUri, findExecutable, runCommand, safeTimestamp, sha256, shellQuote} from '../utils.js';
+import {assertResourceUri, findExecutable, runCommand, safeTimestamp, sha256} from '../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {isRawMemoryDocument} from '../memory/parse.js';
@@ -169,11 +187,6 @@ interface ManagerDirectoryEntry {
   readonly isDirectory: () => boolean;
   readonly isFile: () => boolean;
 }
-class ManagerOperationError extends Schema.TaggedError<ManagerOperationError>()('ManagerOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
-
 function managerOperationError(cause: unknown): ManagerOperationError {
   return Schema.is(ManagerOperationError)(cause)
     ? cause
@@ -299,13 +312,16 @@ const GRAPH_MAINTENANCE_BUSY_MESSAGE =
 
 type ConsolidationStatus = 'completed' | 'failed' | 'running';
 
-interface ConsolidationJob {
+interface ConsolidationJob extends ReviewedConsolidationJob {
+  readonly model?: string;
   readonly agent: ConsolidationAgent;
   readonly createdAt: string;
   readonly id: string;
   readonly sourceUris: readonly string[];
   readonly target: TargetMemoryInput;
   draft?: string;
+  sources?: readonly ConsolidationSource[];
+  resultUri?: string;
   error?: string;
   status: ConsolidationStatus;
 }
@@ -326,39 +342,10 @@ interface BulkItemResult {
   readonly error?: string;
 }
 
-const STATIC_FILES: Readonly<
-  Record<
-    string,
-    {
-      readonly contentType: string;
-      readonly directory?: 'assets/brand' | 'manager';
-      readonly path: string;
-      readonly sourceDirectory?: 'dist/manager' | 'packages/manager/static';
-    }
-  >
-> = {
-  '/': {contentType: 'text/html; charset=utf-8', path: 'index.html', sourceDirectory: 'packages/manager/static'},
-  '/index.html': {
-    contentType: 'text/html; charset=utf-8',
-    path: 'index.html',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/app.css': {
-    contentType: 'text/css; charset=utf-8',
-    path: 'app.css',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js', sourceDirectory: 'dist/manager'},
-  '/threadnote-logo.svg': {
-    contentType: 'image/svg+xml; charset=utf-8',
-    directory: 'assets/brand',
-    path: 'threadnote-logo.svg',
-  },
-};
-
 export function runManage(config: RuntimeConfig, options: ManageOptions) {
   return Effect.scoped(
-    Layer.build(BunHttpServer.layer({hostname: '127.0.0.1', port: options.uiPort ?? 0})).pipe(
+    assertManagerSourceAssets().pipe(
+      Effect.andThen(Layer.build(BunHttpServer.layer({hostname: '127.0.0.1', port: options.uiPort ?? 0}))),
       Effect.flatMap(context =>
         Effect.gen(function* () {
           if (yield* codeGraphMaintenanceIntentActive(config.agentContextHome)) {
@@ -478,7 +465,7 @@ export const readContextUri = Effect.fn('manager.readContextUri')(function* (
 export {detectConsolidationAgents} from './state.js';
 function handleRequestEffect(context: ApiContext, request: ManagerRequest, response: ManagerResponseSink) {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-  let requestEffect;
+  let requestEffect: Effect.Effect<void, unknown, ApplicationServices>;
   if (request.method === 'GET' && url.pathname === '/api/health') {
     requestEffect = Effect.sync(() => {
       const authorized = isAuthorized(context, request);
@@ -495,6 +482,18 @@ function handleRequestEffect(context: ApiContext, request: ManagerRequest, respo
         ...state,
         config: publicConfig(context.config),
       });
+    });
+  } else if (request.method === 'GET' && url.pathname === '/api/consolidation-models') {
+    requestEffect = Effect.gen(function* () {
+      if (!isAuthorized(context, request)) {
+        writeJson(response, 401, {error: 'Unauthorized'});
+        return;
+      }
+      const agent = url.searchParams.get('agent');
+      if (agent !== 'codex' && agent !== 'claude' && agent !== 'local-ai' && agent !== 'effect-ai')
+        return yield* ConsolidationModelsError.make({message: 'Choose a supported agent to load model choices.'});
+      const models = yield* availableConsolidationModels(context.config, agent);
+      writeJson(response, 200, {models: models.map(({id, label, isDefault}) => ({id, label, isDefault}))});
     });
   } else if (request.method === 'POST' && url.pathname === '/api/consolidations') {
     requestEffect = Effect.gen(function* () {
@@ -533,6 +532,7 @@ function handleRequestEffect(context: ApiContext, request: ManagerRequest, respo
           return writeJson(response, error.status, {code: error.code, error: error.message, retryAfterMilliseconds: 0});
         if (Schema.is(graphProjects.ManagerGraphProjectActionError)(error))
           return writeJson(response, 409, {code: error.code, error: error.message, retryAfterMilliseconds: 0});
+        if (Schema.is(ConsolidationModelsError)(error)) return writeJson(response, 400, {error: error.message});
         writeJson(response, 500, {error: errorMessage(error)});
       }),
     ),
@@ -556,6 +556,10 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
   if (!isAuthorized(context, request)) {
     writeJson(response, 401, {error: 'Unauthorized'});
     return;
+  }
+  for (const handler of [handleManagerSharingConflictRequest, handleManagerIntegrationRequest]) {
+    const result = yield* handler({body: request.body, config: context.config, method: request.method, url});
+    if (result) return writeJson(response, result.status, result.body);
   }
   const workflowResponse = yield* handleManagerWorkflowRequest({
     body: request.body,
@@ -1340,6 +1344,11 @@ const runBulk = Effect.fn('manager.runBulk')(function* (
             () => runSharePublish(config, uri, {team: optionalString(body.team)}),
             runEffect,
           )).output;
+        } else if (action === 'unpublish') {
+          output = (yield* runCaptured(
+            () => runShareUnpublish(config, uri, {team: optionalString(body.team)}),
+            runEffect,
+          )).output;
         } else {
           return yield* ManagerOperationError.make({message: `Unsupported bulk action: ${action}`});
         }
@@ -1366,8 +1375,35 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
       }),
       catch: managerOperationError,
     });
+    if (input.sourceUris.length < 2 || input.sourceUris.length > MAX_CONSOLIDATION_SOURCES)
+      return yield* ManagerOperationError.make({message: 'Select 2–16 source memories.'});
+    let selectedModel: ConsolidationModel | undefined;
+    if (
+      input.agent === 'codex' ||
+      input.agent === 'claude' ||
+      input.agent === 'local-ai' ||
+      input.agent === 'effect-ai'
+    ) {
+      yield* Effect.try({
+        try: () => {
+          if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 256)
+            throw ConsolidationModelsError.make({message: 'Choose a model before generating a consolidation draft.'});
+        },
+        catch: cause => cause as ConsolidationModelsError,
+      });
+      const models = yield* availableConsolidationModels(context.config, input.agent);
+      if (input.agent === 'local-ai' && models.length === 0)
+        return yield* ConsolidationModelsError.make({
+          message: 'No generation model is installed. Install one with `threadnote models` and reload model choices.',
+        });
+      selectedModel = yield* Effect.try({
+        try: () => selectConsolidationModel(body.model, models),
+        catch: cause => cause as ConsolidationModelsError,
+      });
+    }
     const job: ConsolidationJob = {
       agent: input.agent,
+      ...(selectedModel ? {model: selectedModel.id} : {}),
       createdAt: DateTime.formatIso(yield* DateTime.now),
       id: yield* crypto.randomUUIDv4,
       sourceUris: input.sourceUris,
@@ -1377,7 +1413,13 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
     context.jobs.set(job.id, job);
     yield* Effect.gen(function* () {
       const sources = yield* Effect.forEach(input.sourceUris, uri => readManagedMemory(context.config, uri));
-      job.draft = yield* runConsolidationAgent(context.config, input.agent, sources);
+      job.sources = yield* Effect.try({
+        try: () => sources.map(source => captureConsolidationSource({uri: source.node.uri, content: source.content})),
+        catch: managerOperationError,
+      });
+      if (new Set(job.sources.map(source => source.uri)).size !== job.sources.length)
+        return yield* ManagerOperationError.make({message: 'Select distinct source memories.'});
+      job.draft = yield* runConsolidationAgent(context.config, input.agent, sources, selectedModel);
       job.status = 'completed';
     }).pipe(
       Effect.catch(error =>
@@ -1396,65 +1438,50 @@ const applyConsolidation = Effect.fn('manager.applyConsolidation')(function* (
   jobs: Map<string, ConsolidationJob>,
   id: string,
   body: Record<string, unknown>,
-  runEffect: ManagerEffectPromise | undefined,
+  _runEffect: ManagerEffectPromise | undefined,
 ) {
   const job = jobs.get(id);
-  if (!job) {
-    throw ManagerOperationError.make({message: 'Consolidation job not found.'});
-  }
-  if (job.status !== 'completed' || !job.draft) {
-    throw ManagerOperationError.make({message: 'Consolidation job is not completed.'});
-  }
-  const draft = optionalString(body.draft) ?? job.draft;
-  const target = targetFromBody({...job.target, ...body});
-  const saved = yield* runCaptured(
-    () =>
-      runRemember(config, {
-        kind: target.kind ?? 'durable',
-        project: target.project,
-        sourceAgentClient: target.sourceAgentClient ?? 'manager',
-        status: target.status ?? 'active',
-        text: draft,
-        topic: target.topic,
-      }),
-    runEffect,
-  );
-  const cleanup = cleanupMode(body.cleanup);
-  const cleanupOutputs: string[] = [];
-  if (cleanup !== 'keep') {
-    for (const uri of job.sourceUris) {
-      if (isInSharedNamespace(config, uri) && body.cleanupShared !== true) {
-        cleanupOutputs.push(`Skipped shared source cleanup: ${uri}`);
-        continue;
-      }
-      const action = cleanup === 'forget' ? () => runForget(config, uri, {}) : () => runArchive(config, uri, {});
-      cleanupOutputs.push((yield* runCaptured(action, runEffect)).output);
-    }
-  }
-  return {output: [saved.output, ...cleanupOutputs].filter(Boolean).join('\n')};
+  if (job && (job.status !== 'completed' || !job.draft))
+    return yield* ManagerOperationError.make({message: 'Consolidation job is not completed.'});
+  return yield* applyReviewedConsolidation(config, job, id, body);
 });
 
 function runConsolidationAgent(
   runtimeConfig: RuntimeConfig,
   agent: ConsolidationAgent,
   sources: readonly {readonly content: string; readonly node: ManagerTreeNode}[],
+  model?: ConsolidationModel,
 ) {
   const prompt = consolidationPrompt(sources);
+  if (agent === 'local-ai') {
+    return Effect.gen(function* () {
+      if (!model)
+        return yield* ConsolidationModelsError.make({
+          message: 'Choose a model before generating a consolidation draft.',
+        });
+      const native = yield* runNativeAiConsolidation(runtimeConfig, prompt, model.id);
+      return (
+        native ??
+        (yield* ManagerOperationError.make({
+          message: 'No generation model is installed. Install one with `threadnote models` and reload model choices.',
+        }))
+      );
+    });
+  }
   if (agent === 'effect-ai') {
     return Effect.gen(function* () {
       const resolved = yield* resolveEffectAiConfiguration(runtimeConfig, (yield* SystemInfo).environment());
       if (resolved) {
+        if (!model || model.id !== resolved.configuration.model)
+          return yield* ConsolidationModelsError.make({
+            message: 'This model is no longer available. Reload model choices and select a model again.',
+          });
         yield* ensureEffectAiReady(runtimeConfig, resolved);
         return yield* runEffectAiConsolidation(prompt, resolved.configuration);
       }
-      const native = yield* runNativeAiConsolidation(runtimeConfig, prompt);
-      return (
-        native ??
-        (yield* ManagerOperationError.make({
-          message:
-            'No generation model is selected. Install and select one with `threadnote models`, or configure an explicit remote Effect AI provider.',
-        }))
-      );
+      return yield* ManagerOperationError.make({
+        message: 'Configure an explicit remote Effect AI provider and reload model choices.',
+      });
     });
   }
   if (agent !== 'codex' && agent !== 'claude') {
@@ -1467,42 +1494,9 @@ function runConsolidationAgent(
     if (!executable) {
       return yield* ManagerOperationError.make({message: `${agent} executable was not found.`});
     }
-    return yield* Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const stagingDir = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-consolidate-'});
-        const promptPath = yield* pathJoin(stagingDir, 'prompt.txt');
-        yield* fs.writeFileString(promptPath, prompt, {mode: 0o600});
-        const script = consolidationAgentScript(agent, executable);
-        const result = yield* runCommandEffect('sh', ['-lc', script, 'threadnote-consolidate', promptPath], {
-          allowFailure: true,
-          maxOutputBytes: 1024 * 1024,
-          timeoutMs: 10 * 60 * 1000,
-        });
-        if (result.exitCode !== 0) {
-          return yield* ManagerOperationError.make({
-            message: result.stderr.trim() || result.stdout.trim() || `${agent} exited with ${result.exitCode}`,
-          });
-        }
-        const draft = result.stdout.trim();
-        if (!draft) {
-          return yield* ManagerOperationError.make({message: `${agent} returned an empty consolidation draft.`});
-        }
-        return draft;
-      }),
+    return yield* runConsolidationAgentCommand(agent, executable, prompt, model).pipe(
+      Effect.catch(error => ManagerOperationError.make({message: errorMessage(error)})),
     );
-  });
-}
-
-export function consolidationAgentScript(agent: AgentClient, executable: string): string {
-  if (agent === 'codex') {
-    return `${shellQuote(executable)} exec --sandbox read-only --skip-git-repo-check - < "$1"`;
-  }
-  if (agent === 'claude') {
-    return `${shellQuote(executable)} --print --permission-mode default < "$1"`;
-  }
-  throw ManagerOperationError.make({
-    message: `${agent} does not expose a supported non-interactive consolidation mode.`,
   });
 }
 

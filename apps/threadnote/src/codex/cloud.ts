@@ -204,9 +204,12 @@ export const runCodexCloudStart = Effect.fn('codexCloud.start')(function* (confi
   const profile = yield* requireCodexCloudProfile(config);
   yield* codexCloudMemoryScope(config);
   const refreshed = yield* captureConsoleWithoutProgress(
-    Effect.forEach(profile.teams, team => runShareSync(config, {push: false, autoCommit: false, team}), {
-      discard: true,
-    }),
+    withSharedRepositoryLock(
+      config,
+      Effect.forEach(profile.teams, team => runShareSync(config, {push: false, autoCommit: false, team}), {
+        discard: true,
+      }),
+    ),
   );
   if (refreshed.output) yield* Console.error(refreshed.output);
   yield* runCodexCloudVerify(config, json);

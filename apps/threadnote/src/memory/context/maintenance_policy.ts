@@ -1,5 +1,11 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {isSharedMemoryUri, type MemoryRecord, type MemoryRelation} from '@threadnote/memory/document';
+import {
+  isAgentArtifactUri,
+  isSharedMemoryUri,
+  type MemoryRecord,
+  type MemoryRelation,
+  canonicalMemoryDocumentContent,
+} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
   contextHealthCaseIdV2,
@@ -9,6 +15,35 @@ import {
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
 
 const MAX_EVENTS = 8;
+
+export function maintenanceContentHash(content: string) {
+  return sha256HexSync(canonicalMemoryDocumentContent(content));
+}
+
+export function nextMaintenanceDeadline(record: MemoryRecord, now: string): string | undefined {
+  return [record.metadata.validTo, record.metadata.reviewAfter]
+    .filter((value): value is string => value !== undefined && Date.parse(value) > Date.parse(now))
+    .sort()[0];
+}
+
+export function artifactOnlySharedRelationProposal(
+  item: ContextMaintenanceCaseV2,
+  subject: MemoryRecord,
+  records: readonly MemoryRecord[],
+): boolean {
+  return (
+    item.family === 'shared-owner-proposal' &&
+    item.reason === 'shared-canonical-relations-require-owner-review' &&
+    item.slot === 'relations' &&
+    isSharedMemoryUri(subject.uri) &&
+    subject.metadata.relations?.some(relation => isAgentArtifactUri(relation.uri)) === true &&
+    subject.metadata.relations.every(relation => {
+      if (isAgentArtifactUri(relation.uri)) return true;
+      const state = resolveRelationTarget(records, relation.uri).state;
+      return state === 'active' || state === 'inactive';
+    })
+  );
+}
 
 export function duplicateArchiveSafe(subject: MemoryRecord, survivor: MemoryRecord | undefined): boolean {
   if (
@@ -68,6 +103,24 @@ export function selectFairMaintenanceWork<T extends {readonly project: string}>(
     if (!added) break;
   }
   return result;
+}
+
+export function selectMaintenanceCitationCaseTask<
+  T extends {readonly record: MemoryRecord; readonly project: string; readonly chunk: number},
+>(items: readonly T[], selected: ContextMaintenanceCaseV2): T | undefined {
+  const matches = items.filter(
+    item =>
+      item.project === selected.project &&
+      (item.record.metadata.memoryId ?? item.record.uri) === selected.memoryId &&
+      (selected.subjectUri === undefined || selected.subjectUri === item.record.uri) &&
+      (selected.family === 'citation-coverage'
+        ? String(item.chunk) === selected.slot
+        : selected.family === 'citation' &&
+          (item.record.metadata.codeCitations?.slice(item.chunk * 64, (item.chunk + 1) * 64) ?? []).some(
+            citation => contextHealthCitationCaseSlotV2(citation) === selected.slot,
+          )),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function updateMaintenanceCase(
@@ -233,6 +286,7 @@ export function resolveMaintenanceRelationPolicy(
   corpus: readonly MemoryRecord[],
   complete = true,
 ): MaintenanceRelationPolicy {
+  if (isAgentArtifactUri(relation.uri)) return {state: 'unknown'};
   const target = resolveRelationTarget(corpus, relation.uri);
   if (target.state === 'conflicted') return {state: 'ambiguous'};
   if (target.state === 'active') return {state: 'active', target: target.record};
